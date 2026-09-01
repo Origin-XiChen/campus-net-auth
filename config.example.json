@@ -1,0 +1,30 @@
+{
+  "portal_host": "172.16.54.18",
+  "portal_port": 80,
+  "portal_base": "/eportal",
+  "username": "1234567890",
+  "service": "YD",
+  "interval": 20,
+  "retry_interval": 30,
+  "max_interval": 600,
+  "offline_interval": 60,
+  "timeout": 8,
+  "detect_targets": [
+    {
+      "host": "www.msftconnecttest.com",
+      "path": "/connecttest.txt",
+      "expect": "Microsoft Connect Test"
+    },
+    {
+      "host": "captive.apple.com",
+      "path": "/hotspot-detect.html",
+      "expect": "Success"
+    },
+    {
+      "host": "www.baidu.com",
+      "path": "/",
+      "expect": ""
+    }
+  ],
+  "log_level": "INFO"
+}

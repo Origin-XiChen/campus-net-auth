@@ -1,0 +1,37 @@
+# ===== 凭据与隐私（绝不提交）=====
+cred.bin
+config.json
+state.json
+daemon.pid
+
+# ===== 运行时日志 =====
+*.log
+
+# ===== 构建产物（打包输出与中间文件）=====
+dist/
+build/
+build_new_*/
+dist_new_*/
+*.spec
+CampusNetAuth.exe
+CampusNetAuthDaemon.exe
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== WebView2 运行时缓存 =====
+.webview2-cache/
+
+# ===== 项目内部文件（记忆/审计/自检报告）=====
+.workbuddy/
+_audit_report.txt
+_smoke_result.txt
+_verify_modular.py
+
+# ===== 抓包证据（只保留脚本，排除抓包结果）=====
+probe/capture_result.json
+probe/capture_report.txt
+
+# ===== 例外：允许提交的配置模板 =====
+!config.example.json
