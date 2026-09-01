@@ -7,9 +7,10 @@
 > 
 ---
 ##注意！本代码全部由AI编写，可能会让你感到红温等等，请谨慎观看源代码！！！
-#参与AI：DeepSeek V4 Flash(主要代码)
-#       DeepSeek V4 Pro（精细修理）
-#       Hy4 Preview（部分精细修理）
+
+参与AI：DeepSeek V4 Flash(主要代码)
+DeepSeek V4 Pro（精细修理）
+Hy4 Preview（部分精细修理）
 ---
 
 ## 快速开始（单 exe 版）
