@@ -1734,13 +1734,19 @@ def ui_component_installed():
 
 
 def autostart_component_status():
-    """开机自启组件状态（以注册表 Run 键为准，vbs 由值守组件/安装时自动补位）：
-    missing=未安装 / installed=启动器就位但未启用 / enabled=已安装并启用"""
+    """开机自启组件状态：以 Run 键 + 启动器 vbs 完整性共同判断。
+    missing=未安装 / installed=启动器就位但未启用 / enabled=已安装并启用
+
+    ⚠️ 2026-09-01 修复：仅看 Run 键不看启动器文件 → Run 键残留但 vbs 缺失时
+    误报 enabled，导致"已启用"误导用户，且开机自启必失败（80070002）。
+    修复：vbs 缺失统一视为 missing（无论 Run 键是否残留）。"""
+    vbs_ok = os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME))
+    if not vbs_ok:
+        # 启动器缺失 → 视为未安装（无论 Run 键是否残留，避免假象）
+        return "missing"
     if autostart_status():
         return "enabled"
-    if os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME)):
-        return "installed"
-    return "missing"
+    return "installed"
 
 
 def components_status():
