@@ -71,6 +71,13 @@ def main() -> None:
     # ⚠️ 注意：WndProc 的 WM_NCHITTEST→HTCAPTION 对 WebView2 子窗口覆盖的客户区
     # 收不到消息（WebView2 消费了命中测试），拖动必须走 JS 官方通道。
     webview.settings['DRAG_REGION_SELECTOR'] = '.drag-region'
+    # ⚠️ DIRECT_TARGET_ONLY 必须保持 True（pywebview 6.x customize.js）：
+    # easy_drag=True 时 window 级 mousedown 监听会对任意位置调用 onMouseDown，
+    # 若 DIRECT_TARGET_ONLY=False 则不做 target 匹配 → 整个页面（内容区/按钮/
+    # 侧栏）按下移动都会拖窗口，灾难级 bug。
+    # True 模式下只有 target 本身匹配 .drag-region 才拖 → 可拖区域偏小，
+    # 由前端在标题栏初始化时给 .tb-brand 及其子元素补 .drag-region 类解决
+    # （见 gui_server.py「标题栏拖动」段），按钮已 stopPropagation 不受影响。
     webview.settings['DRAG_REGION_DIRECT_TARGET_ONLY'] = True
     # 固定 WebView2 用户数据目录(默认 private_mode 每次启动用临时目录:
     # 残留的 msedgewebview2 进程会占住目录 → 启动时删除失败 → WebView2 初始化

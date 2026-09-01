@@ -1038,6 +1038,11 @@ $('#btnMax').onclick = () => win('maximize');
 $('#btnClose').onclick = () => win('close');
 
 /* ---------- 标题栏拖动（pywebview drag-region 官方通道）---------- */
+// DIRECT_TARGET_ONLY=True：只有 target 本身是 .drag-region 才触发拖动 →
+// 把品牌区及其子元素（logo 点 / 标题 / 副标题）全部补上 .drag-region，
+// 整条标题栏（除交通灯按钮区）都可拖；按钮无此 class 且已 stopPropagation。
+document.querySelectorAll('#titlebar .tb-brand, #titlebar .tb-brand *')
+  .forEach(el => el.classList.add('drag-region'));
 // 交通灯按钮阻止 mousedown 冒泡：避免被 .titlebar.drag-region 的拖动劫持成"拖动"
 document.querySelectorAll('.tb-btn').forEach(b => {
   b.addEventListener('mousedown', e => e.stopPropagation());
