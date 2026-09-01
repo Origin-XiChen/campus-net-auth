@@ -1,8 +1,8 @@
 # 校园网无感认证 · CampusNetAuth
 
-![License](https://img.shields.io/github/license/Origin-XiChen/campus-net-auth)
-![Release](https://img.shields.io/github/release/Origin-XiChen/campus-net-auth)
-![Stars](https://img.shields.io/github/stars/Origin-XiChen/campus-net-auth)
+![License](https://img.shields.io/github/license/Origin-XiChen/campus-net-auth?maxAge=300)
+![Release](https://img.shields.io/github/release/Origin-XiChen/campus-net-auth?maxAge=300)
+![Stars](https://img.shields.io/github/stars/Origin-XiChen/campus-net-auth?maxAge=300)
 
 > **校园网自动认证征召**
 >
