@@ -19,6 +19,8 @@ import argparse
 import os
 import sys
 import threading
+import ctypes
+from ctypes import wintypes
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -41,6 +43,114 @@ def _own_webview2_alive(text: str, marker: str) -> bool:
         if "msedgewebview2" in low and marker in low:
             return True
     return False
+
+
+# --- PInvoke 版 msedgewebview2 进程枚举（替代 wmic，绕开沙箱黑名单/Win11 已废弃） ---
+# 启动时记录本程序 WebView2 子进程 PID 列表 → 退出时按 PID 等，
+# 不再依赖 wmic/命令行 marker 检测（wmic 在沙箱被拦时立即 return 导致弹窗）。
+
+_PROCESSENTRY32W_FIELDS = [
+    ("dwSize", ctypes.c_uint32),
+    ("cntUsage", ctypes.c_uint32),
+    ("th32ProcessID", ctypes.c_uint32),
+    ("th32DefaultHeapID", ctypes.c_void_p),
+    ("th32ModuleID", ctypes.c_uint32),
+    ("cntThreads", ctypes.c_uint32),
+    ("th32ParentProcessID", ctypes.c_uint32),
+    ("pcPriClassBase", ctypes.c_long),
+    ("dwFlags", ctypes.c_uint32),
+    ("szExeFile", ctypes.c_wchar * 260),
+]
+_PROCESSENTRY32W = type(
+    "PROCESSENTRY32W",
+    (ctypes.Structure,),
+    {"_fields_": _PROCESSENTRY32W_FIELDS,
+     # ⚠️ 动态 type() 创建的类没有 __class__ cell,lambda 里不能用 super();
+     # 直接调基类构造器 + 填 dwSize(Windows 要求:必须是结构体实际大小)
+     "__init__": lambda self: (ctypes.Structure.__init__(self),
+                               setattr(self, "dwSize", ctypes.sizeof(self)))[-1]},
+)
+_SELF_WEBVIEW2_PIDS: list = []  # 启动时记录的本程序 WebView2 子进程 PID
+
+
+def _collect_webview2_pids(root_pid: int) -> list:
+    """收集以 root_pid 为根的进程树中所有 msedgewebview2.exe 的 PID。
+
+    用 CreateToolhelp32Snapshot 枚举一次快照后按父进程链 BFS 收集：
+    WebView2 的 browser 进程父进程=本程序，renderer/gpu 等子进程父进程=其
+    browser 进程 → 整棵树都能收进来。⚠️ 绝不收集其它应用启动的 WebView2，
+    否则退出等待时可能永远等不到，超时强杀还会误伤别人家的进程。
+    纯 PInvoke，不依赖 wmic（沙箱拦截或 Win11 24H2+ 已废弃时仍可工作）。"""
+    k32 = ctypes.windll.kernel32
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+    if snap == ctypes.c_void_p(-1).value:
+        return []
+    procs: list = []  # (pid, ppid, name)
+    try:
+        pe = _PROCESSENTRY32W()
+        ok = k32.Process32FirstW(snap, ctypes.byref(pe))
+        while ok:
+            procs.append((pe.th32ProcessID, pe.th32ParentProcessID,
+                          pe.szExeFile.lower()))
+            ok = k32.Process32NextW(snap, ctypes.byref(pe))
+    finally:
+        k32.CloseHandle(snap)
+    pids: list = []
+    frontier = [root_pid]
+    while frontier:
+        nxt = []
+        for pid in frontier:
+            for p, pp, name in procs:
+                if pp == pid and name == "msedgewebview2.exe":
+                    pids.append(p)
+                    nxt.append(p)
+        frontier = nxt
+    return pids
+
+
+def _pid_alive(pid: int) -> bool:
+    """PID 是否仍在运行（GetExitCodeProcess 返 STILL_ACTIVE=259 视为还活）。"""
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    code = wintypes.DWORD()
+    ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+    k32.CloseHandle(h)
+    return bool(ok) and code.value == 259  # STILL_ACTIVE
+
+
+def _terminate_pid(pid: int) -> bool:
+    """TerminateProcess 强杀指定 PID（用于等不到 WebView2 自然退出时兜底释放句柄）。"""
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+    if not h:
+        return False
+    r = k32.TerminateProcess(h, 1)
+    k32.CloseHandle(h)
+    return bool(r)
+
+
+def _record_webview2_pids(delay: float = 2.0, retries: int = 4) -> None:
+    """webview.start() 启动后异步记录"本程序进程树内"的 msedgewebview2 PID。
+
+    用线程延迟枚举(WebView2 子进程启动有 1~2 秒延迟)，记录到
+    _SELF_WEBVIEW2_PIDS 供退出时 _wait_webview2_exit 按 PID 等待；
+    记录失败(启动过慢)则每 1s 重试，最多 retries 次，仍空则留给 wmic 兜底。
+    只记录父进程链是本程序的 WebView2，不误收其它应用。"""
+    def _worker():
+        time.sleep(delay)
+        for _ in range(retries):
+            try:
+                pids = _collect_webview2_pids(os.getpid())
+                if pids:
+                    _SELF_WEBVIEW2_PIDS.clear()
+                    _SELF_WEBVIEW2_PIDS.extend(pids)
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(1.0)
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def main() -> None:
@@ -94,14 +204,49 @@ def main() -> None:
         %TEMP%\\_MEIxxxx 解包目录;若 msedgewebview2.exe 尚未退出并仍占用该
         目录内文件,删除失败 → windowed 模式下弹 "Failed to remove temporary
         directory" 警告(见 v6.22.2 源码 pyi_main_onefile_parent_cleanup)。
-        这里只等"命令行包含本程序 .webview2-cache"的 WebView2 进程,不会误等
-        其它 WebView2 应用;wmic 不可用时兜底短暂等待;超时绝不阻塞退出。
+
+        主路径:启动时 _record_webview2_pids() 已把本程序进程树内的 WebView2
+        PID 记进 _SELF_WEBVIEW2_PIDS,这里按 PID 轮询等其自然退出;等待中每轮
+        补收进程树新 PID(WebView2 可能重启渲染进程);超时后 TerminateProcess
+        强杀残余 → 强制释放 _MEI 目录句柄 → bootloader 清理不再弹警告。
+        兜底:列表为空(启动后立即退出,记录线程来不及落盘)时回退 wmic +
+        命令行 marker 检测。仅操作本程序进程树内的 PID,绝不误伤其它应用。
         """
         if not getattr(sys, "frozen", False):
             return
+        deadline = time.time() + timeout
+        # 阶段1:给 _record_webview2_pids 线程一点时间把 PID 写入列表
+        # (冷启动 WebView2 起来慢,用户快速关闭时记录线程可能尚未落盘;
+        #  等不到就回退 wmic,但主路径优先,绝不依赖 wmic 是否可用)
+        fill_end = time.time() + min(2.5, timeout * 0.6)
+        while not _SELF_WEBVIEW2_PIDS and time.time() < fill_end:
+            time.sleep(0.2)
+        pids = list(_SELF_WEBVIEW2_PIDS)
+        if pids:
+            # 主路径:按 PID 等自然退出;每轮重读记录列表合并新 PID,
+            # 并补收进程树新增 WebView2(WebView2 可能重启渲染进程)
+            while time.time() < deadline:
+                try:
+                    pids = list(dict.fromkeys(pids + list(_SELF_WEBVIEW2_PIDS)))
+                    alive = [p for p in pids if _pid_alive(p)]
+                    for p in _collect_webview2_pids(os.getpid()):
+                        if p not in pids:
+                            pids.append(p)
+                    if not alive:
+                        return  # 本程序的 WebView2 已全部退出,句柄已释放
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(0.3)
+            # 超时:强杀残余 WebView2,强制释放 _MEI 目录句柄
+            for p in pids:
+                try:
+                    _terminate_pid(p)
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        # 兜底:启动后立即退出、PID 记录缺失时,用 wmic + 命令行 marker 检测
         import subprocess as _sp
         marker = _webview_cache.lower()
-        deadline = time.time() + timeout
         try:
             while time.time() < deadline:
                 try:
@@ -461,6 +606,7 @@ def main() -> None:
     threading.Thread(target=_window_watchdog, daemon=True).start()
 
     try:
+        _record_webview2_pids()  # 异步记录本程序 WebView2 子进程 PID(供退出等待,勿删)
         webview.start(debug=args.dev, private_mode=False, storage_path=_webview_cache)
         # 窗口已关闭:等 WebView2 子进程释放 _MEIPASS 句柄后立即退出进程
         # (不能只靠 main 返回——pywebview/.NET 的后台线程会阻止 Python 解释器
