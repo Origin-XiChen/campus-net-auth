@@ -2301,7 +2301,7 @@ def cmd_ui(args):
         pass
     force_utf8_console()
     hide_console()  # 双击 exe 时消除黑窗；从 cmd 前台运行时不动父控制台
-    # ---- HTML UI（pywebview，Novelist 同款）优先 ----
+    # ---- HTML UI（pywebview）优先 ----
     # 注意：desktop.main() 阻塞直到窗口关闭；仅当 pywebview 缺失或
     # WebView2 初始化失败时才快速返回/抛异常 → 回退 tkinter。
     try:

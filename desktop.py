@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """CampusNetAuth · 桌面壳(pywebview)
 
-把 HTML GUI 包进原生桌面窗口(与 Novelist 小说管家同款方案):
+把 HTML GUI 包进原生桌面窗口(pywebview + Edge WebView2):
   - 单进程:后端 HTTPServer 线程 + pywebview 窗口(Edge WebView2)
   - 无边框自绘标题栏:WndProc 子类化接管拖动/Aero Snap/双击最大化/边缘缩放
   - hidden=True 等 WebView2 加载完成再显示 → 彻底零闪启动
