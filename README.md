@@ -1,10 +1,10 @@
 # 校园网无感认证 · CampusNetAuth
 
 ![License](https://img.shields.io/github/license/Origin-XiChen/campus-net-auth)
-![Release](https://img.shields.io/github/v/release/Origin-XiChen/campus-net-auth)
+![Release](https://img.shields.io/github/release/Origin-XiChen/campus-net-auth)
 ![Stars](https://img.shields.io/github/stars/Origin-XiChen/campus-net-auth)
 
-> **iHBUT 校园网征兵令**
+> **校园网自动认证征召**
 >
 > 校园网，我们的家园。
 > 通畅，联网。
@@ -15,7 +15,7 @@
 > 但网络，也有代价。
 >
 > *（弹窗跳认证页面）*
-> “不，我的浏览自由啊 —— 不 ——！！”
+> “我的便捷登录啊！”
 >
 > **【认证入侵】**
 >
