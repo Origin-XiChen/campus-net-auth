@@ -1,5 +1,9 @@
 # 校园网无感认证 · CampusNetAuth
 
+![License](https://img.shields.io/github/license/Origin-XiChen/campus-net-auth)
+![Release](https://img.shields.io/github/v/release/Origin-XiChen/campus-net-auth)
+![Stars](https://img.shields.io/github/stars/Origin-XiChen/campus-net-auth)
+
 > **iHBUT 校园网征兵令**
 >
 > 校园网，我们的家园。
@@ -53,6 +57,12 @@
 - **凭据安全**：密码经 Windows DPAPI 加密，绑定当前用户，文件被拷走也无法解密
 - **零第三方依赖**：运行时零第三方库，打包后无需任何 Python 环境
 
+## 系统要求
+
+- **Windows 10 / 11**（x64），需 [Microsoft Edge WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)（Windows 11 与多数 Windows 10 已内置）
+- 仅限 **湖北工业大学 iHBUT** 校园网内使用：程序只在门户 `172.16.54.18` 可达时动作，校外静默待命
+- 免安装 Python、免管理员权限（开机自启走当前用户注册表 Run 键）
+
 ## 快速开始（单 exe 版）
 
 | 步骤 | 操作 | 说明 |
@@ -83,6 +93,8 @@
 
 ## 管理界面
 
+> **界面截图占位**：截一张主界面图（「连接与账号」或「自动化」页）替换本行，让 README 第一眼看到 UI。
+
 HTML 现代 Web 风格（本地 HTTP 服务 + 原生 Edge WebView2 窗口，单进程零额外依赖）。
 窗口无边框自绘：顶部毛玻璃标题栏、Apple 交通灯式按钮，
 按住标题栏任意位置可拖动，双击切换最大化，边缘可拖拽调大小，支持 Aero Snap。
@@ -109,15 +121,20 @@ HTML 现代 Web 风格（本地 HTTP 服务 + 原生 Edge WebView2 窗口，单�
 |---|---|---|
 | `portal_host` | `172.16.54.18` | 门户地址 |
 | `portal_port` | `80` | 端口 |
-| `username` | `1234567890` | 学号（示例，换成你自己的） |
-| `service` | `YD` | 服务：`default`校园网 / `DX`电信 / `YD`移动 / `LT`联通 / `auto`自动 |
-| `interval` | `20` | 在线时的检测周期（秒），即掉线后最长多久自动重连 |
+| `portal_base` | `/eportal` | 门户接口路径前缀 |
+| `username` | （空） | 学号（`config.example.json` 里为示例 `1234567890`） |
+| `service` | `default` | 服务：`default`校园网 / `DX`电信 / `YD`移动 / `LT`联通 / `auto`自动 |
+| `interval` | `30` | 在线时的检测周期（秒），即掉线后最长多久自动重连 |
 | `retry_interval` | `30` | 登录失败后的重试间隔，指数退避 |
 | `max_interval` | `600` | 退避上限（秒） |
 | `offline_interval` | `60` | 网络完全不可达时的检测周期 |
 | `timeout` | `8` | 单次 HTTP 超时（秒） |
+| `probe_timeout` | `3` | 连通性/门户探测超时（秒），网络差时快速判定 |
+| `keepalive_interval` | `300` | 在线续约会话间隔（秒），防认证过期被踢 |
 | `verify_interval` | `5` | 登录成功后即时确认等待（秒）：防网关"假成功" |
+| `recheck_interval` | `30` | 校外/断网退避期间的环境快探间隔（秒），网络恢复即时响应 |
 | `detect_targets` | 3 个 | 连通性检测目标（HTTP，避免 HTTPS 证书干扰） |
+| `log_level` | `INFO` | 日志级别 |
 
 密码**不写进** `config.json`，单独用 **Windows DPAPI** 加密存 `cred.bin`，
 只有当前 Windows 用户能解密，换用户/换机器自动失效。
@@ -259,4 +276,4 @@ CLI 从 cmd 运行时通过 `AttachConsole` 附加父控制台并按代码页输
 
 ---
 
-*本项目为个人校园网便利工具，仅供学习与自用。*
+*项目定位为个人校园网便利工具，仅供学习与自用。采用 [MIT License](LICENSE)，详见仓库 `LICENSE` 文件。*

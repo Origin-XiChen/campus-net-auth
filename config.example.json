@@ -3,12 +3,16 @@
   "portal_port": 80,
   "portal_base": "/eportal",
   "username": "1234567890",
-  "service": "YD",
-  "interval": 20,
+  "service": "default",
+  "interval": 30,
   "retry_interval": 30,
   "max_interval": 600,
   "offline_interval": 60,
   "timeout": 8,
+  "probe_timeout": 3,
+  "keepalive_interval": 300,
+  "verify_interval": 5,
+  "recheck_interval": 30,
   "detect_targets": [
     {
       "host": "www.msftconnecttest.com",
