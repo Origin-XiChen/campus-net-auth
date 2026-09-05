@@ -196,11 +196,24 @@ def _task_self_test() -> str:
     else:
         cmd = [sys.executable, os.path.join(cn.BASE_DIR, "campusnet.py"),
                "test"]
+    # 子进程管道 stdout 默认按系统 locale（GBK）编码；不显式指定 UTF-8，
+    # 输出进弹窗后中文会变乱码。解码端再留 GBK 兜底。
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
     r = subprocess.run(cmd, capture_output=True, timeout=120,
-                       creationflags=flags, cwd=cn.BASE_DIR)
-    out = (r.stdout or b"").decode("utf-8", "replace")
-    err = (r.stderr or b"").decode("utf-8", "replace")
-    return out + err
+                       creationflags=flags, cwd=cn.BASE_DIR, env=env)
+    return _decode_subprocess_output(r.stdout) + \
+        _decode_subprocess_output(r.stderr)
+
+
+def _decode_subprocess_output(raw: bytes) -> str:
+    if not raw:
+        return ""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
 
 
 def _task_health() -> str:
