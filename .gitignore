@@ -29,6 +29,7 @@ _audit_report.txt
 _smoke_result.txt
 _verify_modular.py
 e2e_result.txt
+HANDOVER.md
 
 # ===== 抓包证据（只保留脚本，排除抓包结果）=====
 probe/capture_result.json

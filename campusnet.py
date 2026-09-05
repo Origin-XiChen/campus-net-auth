@@ -1547,9 +1547,10 @@ def run_daemon(cfg, cred):
                     if isinstance(info, dict) and info.get("userIndex"):
                         if persisted_index != info["userIndex"]:
                             persisted_index = info["userIndex"]
-                            st = load_state()
-                            st["userIndex"] = persisted_index
-                            save_state(st)
+                            with _state_lock():
+                                st = load_state()
+                                st["userIndex"] = persisted_index
+                                save_state(st)
                 except Exception:
                     pass
                 _hb()
@@ -1813,10 +1814,11 @@ def mark_first_run():
     """
     if not FIRST_DEPLOY:
         return
-    st = load_state()
-    if "first_run_at" not in st:
-        st["first_run_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        save_state(st)
+    with _state_lock():
+        st = load_state()
+        if "first_run_at" not in st:
+            st["first_run_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            save_state(st)
 
 
 def _ensure_daemon_vbs():
