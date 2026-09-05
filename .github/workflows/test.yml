@@ -1,0 +1,20 @@
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile check (all Python sources)
+        run: python -m py_compile campusnet.py gui_server.py desktop.py ui.py diagnose_probe.py smoke_regression.py smoke_state_write.py e2e_test.py
+      - name: Unit tests (offline, no network)
+        run: python -m unittest discover -s tests -v
+      - name: Frontend JS syntax check (INDEX_HTML embedded in gui_server.py)
+        run: |
+          python -c "import re; src=open('gui_server.py',encoding='utf-8').read(); open('_ci_ui_check.js','w',encoding='utf-8').write(re.search(r'<script>(.*?)</script>', src, re.S).group(1))"
+          node --check _ci_ui_check.js

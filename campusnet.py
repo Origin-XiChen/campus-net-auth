@@ -23,6 +23,7 @@ import time
 import ctypes
 import atexit
 import getpass
+import hashlib
 import socket
 import logging
 import argparse
@@ -30,6 +31,7 @@ import shutil
 import subprocess
 import http.client
 import urllib.parse
+import contextlib
 import logging.handlers
 import concurrent.futures as _cf
 from ctypes import wintypes
@@ -157,6 +159,10 @@ DEFAULT_CONFIG = {
          "expect": "Success"},
         {"host": "www.baidu.com", "path": "/", "expect": ""},
     ],
+    # 门户公钥 pinning（TOFU）：首次成功登录记录 RSA 公钥指纹到 state.json，
+    # 之后指纹不一致即拒发凭据，防伪装门户/同 IP 中间人窃密。
+    # 学校更换密钥后需删除 state.json 的 portal_pubkey_fp 字段重新锚定。
+    "pin_pubkey": True,
     "log_level": "INFO",
 }
 
@@ -794,6 +800,38 @@ class PortalClient:
         encrypt_flag = fields.get("passwordEncrypt", "false")
         use_encrypt = str(encrypt_flag).lower() == "true"
 
+        # ---- 门户公钥 pinning（TOFU，pin_pubkey 可关）----
+        # 威胁模型：门户身份只靠"私网 IP 可达"判定，任何能在该 IP 应答的设备
+        # （伪装 AP / 同网段攻击者）都能下发自己的 RSA 公钥，收到密文后用自有
+        # 私钥解开 → 凭据被盗。缓解：首次成功登录时把公钥指纹记入 state.json，
+        # 之后指纹不一致（或已记录指纹但页面突然不加密）一律拒发凭据。
+        # 已知局限：TOFU 首登窗口无法防御（首登即在伪造网络时仍会中招）；
+        # 学校更换密钥时会拒绝登录，按报错提示删除 state.json 的
+        # portal_pubkey_fp 字段（或把 pin_pubkey 置 false）即可恢复。
+        pin_on = bool(self.cfg.get("pin_pubkey", True))
+        fp = None
+        if pin_on:
+            pinned = load_state().get("portal_pubkey_fp")
+            if not use_encrypt:
+                if pinned:
+                    return {"result": "fail",
+                            "_hint": "门户公钥校验失败",
+                            "message": "门户登录页未启用加密，与首次记录不符"
+                                       "（疑似伪装门户）。如确认学校变更，请删除"
+                                       " state.json 的 portal_pubkey_fp 字段后重试，"
+                                       "或将 pin_pubkey 设为 false"}
+            elif exp and mod:
+                fp = hashlib.sha256(
+                    (exp.strip().lower() + ":" + mod.strip().lower())
+                    .encode("ascii")).hexdigest()
+                if pinned and pinned != fp:
+                    return {"result": "fail",
+                            "_hint": "门户公钥指纹变化",
+                            "message": "门户 RSA 公钥指纹与首次记录不一致"
+                                       "（疑似伪装门户/中间人）。如确认学校更换密钥，"
+                                       "删除 state.json 的 portal_pubkey_fp 字段后重试，"
+                                       "或将 pin_pubkey 设为 false"}
+
         # 服务选择
         service = service_hint or self.cfg.get("service", "default")
         if service == "auto":
@@ -840,6 +878,13 @@ class PortalClient:
             self._user_index = res.get("userIndex")
             res["_service"] = service
             res["_encrypted"] = use_encrypt
+            # TOFU：首次成功登录后落盘公钥指纹（仅在成功路径记录，
+            # 避免把"失败场景下看到的公钥"误当成基准）
+            if pin_on and fp and not load_state().get("portal_pubkey_fp"):
+                try:
+                    update_state({"portal_pubkey_fp": fp})
+                except Exception:
+                    pass
         else:
             msg = res.get("message", "")
             for code, hint in ERR_HINT.items():
@@ -869,21 +914,74 @@ class PortalClient:
 
 # ============================ 配置与守护 ============================
 
+def _sanitize_config(cfg):
+    """配置类型/范围兜底：坏值回退默认或钳到合法区间，
+    避免守护循环被非法配置拖死（如 detect_targets 被写成字符串、
+    interval 为负数导致 select 抛错空转等）。"""
+    for k in ("portal_port", "interval", "retry_interval", "max_interval",
+              "offline_interval", "timeout", "probe_timeout",
+              "keepalive_interval", "verify_interval", "recheck_interval"):
+        try:
+            cfg[k] = int(cfg[k])
+        except (TypeError, ValueError):
+            cfg[k] = DEFAULT_CONFIG[k]
+    cfg["interval"] = max(5, cfg["interval"])
+    cfg["retry_interval"] = max(5, cfg["retry_interval"])
+    cfg["max_interval"] = max(60, cfg["max_interval"])
+    cfg["offline_interval"] = max(5, cfg["offline_interval"])
+    cfg["timeout"] = min(max(2, cfg["timeout"]), 60)
+    cfg["probe_timeout"] = min(max(1, cfg["probe_timeout"]), 30)
+    cfg["keepalive_interval"] = max(30, cfg["keepalive_interval"])
+    cfg["verify_interval"] = max(2, cfg["verify_interval"])
+    cfg["recheck_interval"] = max(5, cfg["recheck_interval"])
+    targets = cfg.get("detect_targets")
+    if not isinstance(targets, list):
+        targets = None  # 非列表（如字符串 "x" 是 truthy）一律按缺失处理
+    else:
+        targets = [t for t in targets
+                   if isinstance(t, dict) and t.get("host")]
+    if not targets:
+        cfg["detect_targets"] = json.loads(
+            json.dumps(DEFAULT_CONFIG["detect_targets"]))
+    if not isinstance(cfg.get("portal_host"), str) or not cfg["portal_host"]:
+        cfg["portal_host"] = DEFAULT_CONFIG["portal_host"]
+    # 布尔项容错（用户手写 JSON 可能写成字符串 "false"）
+    v = cfg.get("pin_pubkey", True)
+    cfg["pin_pubkey"] = v if isinstance(v, bool) else True
+    return cfg
+
+
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 user_cfg = json.load(f)
-            cfg.update(user_cfg)
+            if isinstance(user_cfg, dict):
+                cfg.update(user_cfg)
         except Exception as e:
             log.warning("配置文件读取失败，使用默认配置: %r", e)
-    return cfg
+    return _sanitize_config(cfg)
+
+
+def _atomic_write_json(path, obj):
+    """原子写 JSON：先写临时文件（flush+fsync）再 os.replace 换位。
+    进程被杀/断电也只会留下完整旧文件或完整新文件，不会半截截断。
+    （历史隐患：config.json 截断 → load_config 回退默认丢账号；
+    state.json 截断 → load_state 返回 {} 丢 events/first_run_at。）"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    try:
+        _atomic_write_json(CONFIG_PATH, cfg)
+    except Exception as e:
+        log.error("保存配置失败: %r", e)
 
 
 def load_state():
@@ -896,8 +994,38 @@ def load_state():
     return {}
 
 
+@contextlib.contextmanager
+def _state_lock(timeout=3.0):
+    """跨进程文件锁（O_EXCL 锁文件）：守护与 UI 进程都会写 state.json，
+    保护"读-改-写"不被并发冲掉（丢 events/userIndex）。
+    超时或创建失败降级为不加锁（fail-open，防锁文件残留把写永久卡死）。"""
+    lockp = STATE_PATH + ".lock"
+    fh = None
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            fh = os.open(lockp, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            time.sleep(0.05)
+        except OSError:
+            break
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                os.close(fh)
+            except OSError:
+                pass
+            try:
+                os.remove(lockp)
+            except OSError:
+                pass
+
+
 def save_state(state):
-    """整体覆盖写 state.json。
+    """整体覆盖写 state.json（原子写，见 _atomic_write_json）。
 
     ⚠️ 除非你就是要删字段（如 clear_session），否则一律用 update_state()
     合并写——整体替换会丢掉 first_run_at（首跑时间戳）与 events（最近事件条）
@@ -907,8 +1035,7 @@ def save_state(state):
     所以整写不会让"空文件夹提醒"重现；但字段丢失本身就是 bug，必须合并写。
     """
     try:
-        with open(STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(STATE_PATH, state)
     except Exception:
         pass
 
@@ -916,21 +1043,24 @@ def save_state(state):
 def update_state(patch, drop=()):
     """合并式更新 state.json：保留其它字段（如 first_run_at 部署标记、
     守护写入的 userIndex 等），避免整字典覆盖互相冲掉。
-    drop 为需删除的字段名元组（如登录成功后清除 last_error）。"""
-    st = load_state()
-    for k in drop:
-        st.pop(k, None)
-    st.update(patch)
-    save_state(st)
+    drop 为需删除的字段名元组（如登录成功后清除 last_error）。
+    读-改-写全程持 _state_lock，防守护与 UI 并发互踩。"""
+    with _state_lock():
+        st = load_state()
+        for k in drop:
+            st.pop(k, None)
+        st.update(patch)
+        save_state(st)
 
 
 def clear_session():
     """下线/重置时清除会话字段（userIndex/loginTime/last_error），
     保留 first_run_at 等部署标记，避免重新触发全新部署判定。"""
-    st = load_state()
-    for k in ("userIndex", "loginTime", "last_error"):
-        st.pop(k, None)
-    save_state(st)
+    with _state_lock():
+        st = load_state()
+        for k in ("userIndex", "loginTime", "last_error"):
+            st.pop(k, None)
+        save_state(st)
 
 
 # 状态事件类型 → 展示文案（供 UI 即时状态条复用）
@@ -951,16 +1081,17 @@ def record_event(kind, msg):
     去重规则：与最后一条同 kind 且同 msg 且在 60s 内 → 只更新时间戳，
     防止"连续登录失败"这类事件风暴刷屏。其余场景（状态翻转/登录结果）
     天然低频，不会给 state.json 造成写盘压力。"""
-    st = load_state()
-    evs = st.get("events") or []
-    now = int(time.time())
-    if (evs and evs[-1]["kind"] == kind and evs[-1]["msg"] == msg
-            and now - evs[-1]["t"] < 60):
-        evs[-1]["t"] = now  # 同事件 60s 内合并
-    else:
-        evs.append({"t": now, "kind": kind, "msg": msg})
-    st["events"] = evs[-8:]
-    save_state(st)
+    with _state_lock():
+        st = load_state()
+        evs = st.get("events") or []
+        now = int(time.time())
+        if (evs and evs[-1]["kind"] == kind and evs[-1]["msg"] == msg
+                and now - evs[-1]["t"] < 60):
+            evs[-1]["t"] = now  # 同事件 60s 内合并
+        else:
+            evs.append({"t": now, "kind": kind, "msg": msg})
+        st["events"] = evs[-8:]
+        save_state(st)
 
 
 def acquire_singleton():
@@ -1365,25 +1496,37 @@ def run_daemon(cfg, cred):
         """可中断等待：阻塞至超时或收到指令（STOP=优雅退出 / CHECK=唤醒复核）。
 
         select 可被 socket 数据即时打断，比 time.sleep 多了"立即响应"能力：
-        UI 手动操作后发 CHECK，等待中的守护立刻醒来复核，不等完整周期。"""
-        try:
-            _ready, _, _ = _select.select([lock], [], [], sec)
-            if not _ready:
+        UI 手动操作后发 CHECK，等待中的守护立刻醒来复核，不等完整周期。
+
+        ⚠️ 空连接（daemon_running() 存活探测就是"连接即关、零数据"）绝不能
+        截断等待——否则 UI 每 20s 轮询一次 /api/status 就把守护提前唤醒做
+        一整轮探测，interval 检测周期名存实亡、公网探测目标被白打。空数据
+        或未知指令一律吞掉、继续等剩余时间；只有 STOP / CHECK 才真正打断。
+        """
+        deadline = time.time() + max(0.0, float(sec))
+        while True:
+            remain = deadline - time.time()
+            if remain <= 0:
                 return None
-            _conn, _ = lock.accept()
             try:
-                _data = _conn.recv(16).decode("utf-8", "replace").strip().upper()
-            finally:
-                _conn.close()
+                _ready, _, _ = _select.select([lock], [], [], remain)
+                if not _ready:
+                    return None
+                _conn, _ = lock.accept()
+                try:
+                    _data = _conn.recv(16).decode("utf-8", "replace").strip().upper()
+                finally:
+                    _conn.close()
+            except Exception:
+                return None
             if _data == "STOP":
                 log.info("收到停止指令，守护优雅退出")
                 return "STOP"
             if _data == "CHECK":
                 # UI 手动登录/操作后发来：结束等待，立即进入本轮探测
                 log.info("收到唤醒指令，立即复核网络状态")
-            return None
-        except Exception:
-            return None
+                return None
+            # 空连接 / 未知数据：存活探测或噪声，吞掉并继续等待剩余时间
 
     while True:
         try:
@@ -2023,7 +2166,11 @@ def cmd_setup(args):
             host = urllib.parse.urlparse(host).netloc
         cfg["portal_host"] = host.split(":")[0]
         if ":" in host:
-            cfg["portal_port"] = int(host.split(":")[1])
+            try:
+                cfg["portal_port"] = int(host.split(":")[1])
+            except ValueError:
+                print("! 端口 '%s' 不是数字，保持原端口 %s"
+                      % (host.split(":")[1], cfg["portal_port"]))
 
     user = input("账号(学号) [%s]: " % cfg["username"]).strip()
     if user:

@@ -166,7 +166,10 @@ def main() -> None:
     srv, url = gui_server.serve(0, "127.0.0.1")
     if args.dev:
         print(f"[desktop] 后端已启动: {url}", flush=True)
-    # 端口落盘到 _ui_trace.log：便于无头验证 / 远程排查定位本机服务地址
+    # 服务地址（含会话 token）落盘到 _ui_trace.log：便于无头验证 / 冒烟测试
+    # 发现本机服务地址。该文件与 cred.bin 同目录、同用户 ACL——能读到它的
+    # 进程本就可 DPAPI 解密凭据，token 落盘不扩大攻击面；token 真正防的是
+    # 网页与其他本地用户（读不到此文件）。
     try:
         import campusnet as _cn
         with open(os.path.join(_cn.BASE_DIR, "_ui_trace.log"), "a",

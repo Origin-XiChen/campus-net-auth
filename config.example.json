@@ -30,5 +30,6 @@
       "expect": ""
     }
   ],
+  "pin_pubkey": true,
   "log_level": "INFO"
 }

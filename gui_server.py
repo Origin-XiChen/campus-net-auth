@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -35,6 +36,12 @@ _LOG_TAIL = 200
 _TASKS: dict = {}
 _TASKS_LOCK = threading.Lock()
 _TASK_TTL = 300  # 已完成任务保留秒数，超过自动清理（防 _TASKS 无限增长）
+
+# 会话令牌：serve() 每次启动随机生成，随页面 URL（?token=）传给前端；
+# 所有 /api/* 请求必须带 X-CNA-Token 头、根页面必须带正确的 ?token= 查询，
+# 否则一律 403。用途：防本机其它进程或恶意网页（simple-request CSRF 可
+# 跨源发 POST 但无法自定义头）越权调用管理接口（改配置/连接/装卸自启等）。
+_AUTH_TOKEN = ""
 
 
 def _prune_tasks() -> None:
@@ -163,10 +170,20 @@ def _start_task(fn) -> str:
             with _TASKS_LOCK:
                 _TASKS[tid] = {"status": "done", "output": out,
                                "ts": time.time()}
+            # 输出同步写日志：前端弹窗看一遍，日志里也能回溯
+            # （修复"自检/体检结果实际无处可看"的问题）
+            try:
+                cn.log.info("后台任务完成，输出:\n%s", str(out)[:4000])
+            except Exception:
+                pass
         except Exception as e:  # noqa: BLE001
             with _TASKS_LOCK:
                 _TASKS[tid] = {"status": "error", "output": "%r" % e,
                                "ts": time.time()}
+            try:
+                cn.log.warning("后台任务失败: %r", e)
+            except Exception:
+                pass
 
     threading.Thread(target=run, daemon=True).start()
     return tid
@@ -247,10 +264,40 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             return {}
 
+    # ---- 访问控制 ----
+    def _gate(self, path: str) -> bool:
+        """统一访问控制：放行返回 True，否则本函数已回 403，调用方直接 return。
+
+        * Host 必须回环：挡 DNS rebinding（外部域名解析到 127.0.0.1 时，
+          浏览器发出的 Host 头不是回环地址）；
+        * /api/* 校验 X-CNA-Token 头：网页跨源带自定义头必触发 CORS 预检
+          （本服务不应答 OPTIONS → 请求根本发不出来），本机其它进程又
+          拿不到每次启动随机生成的令牌；
+        * 根页面校验 ?token= 查询：页面 JS 从 location.search 取令牌，
+          只拿到 HTML 不等于拿到令牌。
+        """
+        host = (self.headers.get("Host") or "").split(":", 1)[0].strip().lower()
+        if host not in ("127.0.0.1", "localhost"):
+            self._json({"error": "forbidden"}, 403)
+            return False
+        tok = _AUTH_TOKEN
+        if path.startswith("/api/"):
+            ok = bool(tok) and self.headers.get("X-CNA-Token") == tok
+        elif path in ("/", "/index.html"):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            ok = bool(tok) and ("token=" + tok) in qs.split("&")
+        else:
+            ok = True  # 未知路径 → 走 404，无需令牌
+        if not ok:
+            self._json({"error": "forbidden"}, 403)
+        return ok
+
     # ---- GET ----
     def do_GET(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+        if not self._gate(path):
+            return
         try:
             if path in ("/", "/index.html"):
                 self._send(INDEX_HTML.encode("utf-8"),
@@ -283,6 +330,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---- POST ----
     def do_POST(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if not self._gate(path):
+            return
         data = self._body()
         try:
             if path == "/api/config":
@@ -346,34 +395,57 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "%r" % e}, 500)
 
     # ---- 具体实现 ----
-    def _save_config(self, data: dict) -> None:
+    def _apply_config(self, data: dict) -> None:
+        """应用配置变更（只写盘，绝不回包）。
+
+        ⚠️ 历史 bug：旧版 _save_config 内部回包 + _connect 再次回包，
+        同一请求发出两段完整 HTTP 响应，前端 fetch 只读到第一段
+        {"ok": true} →「保存并连接 / 立即检测」恒报成功，真实失败被吞。
+        故拆分：本函数不应答，由各端点自行回包且只回一次。"""
         cfg = cn.load_config()
         if "host" in data:
             host, _, port = str(data["host"]).partition(":")
-            cfg["portal_host"] = host.strip()
+            host = host.strip()
+            # 只接受合法主机名/IP 字符，拒绝带协议头、路径或怪字符的输入
+            if host and re.fullmatch(r"[A-Za-z0-9.\-]{1,253}", host):
+                cfg["portal_host"] = host
             if port.strip().isdigit():
-                cfg["portal_port"] = int(port)
+                p = int(port)
+                if 1 <= p <= 65535:
+                    cfg["portal_port"] = p
+        # 数值项范围钳制（负 interval 会让守护 select 抛错空转等）
+        _INT_BOUNDS = {"interval": (5, 3600), "offline_interval": (5, 3600),
+                       "retry_interval": (5, 3600), "max_interval": (60, 86400),
+                       "timeout": (2, 60)}
+        _SERVICES = ("default", "DX", "YD", "LT", "auto")
         for key in ("username", "service", "interval", "offline_interval",
                     "retry_interval", "max_interval", "timeout"):
             if key in data and str(data[key]) != "":
                 v = data[key]
-                if key in ("interval", "offline_interval", "retry_interval",
-                           "max_interval", "timeout"):
+                if key in _INT_BOUNDS:
                     try:
-                        cfg[key] = int(v)
-                    except Exception:  # noqa: BLE001
-                        pass
+                        iv = int(v)
+                    except (TypeError, ValueError):
+                        continue
+                    lo, hi = _INT_BOUNDS[key]
+                    cfg[key] = min(max(lo, iv), hi)
+                elif key == "service":
+                    if str(v) in _SERVICES:
+                        cfg[key] = str(v)
                 else:
-                    cfg[key] = str(v)
+                    cfg[key] = str(v)[:64]  # username
         cn.save_config(cfg)
         # 密码：留空表示不修改
         pwd = data.get("password") or ""
         if pwd:
             cn.CredentialStore().save(pwd)
+
+    def _save_config(self, data: dict) -> None:
+        self._apply_config(data)
         self._json({"ok": True})
 
     def _connect(self, data: dict) -> None:
-        self._save_config(data)
+        self._apply_config(data)
         cfg = cn.load_config()
         cred = cn.CredentialStore().load()
         if not cfg.get("username") or not cred:
@@ -432,11 +504,13 @@ def find_free_port() -> int:
 
 
 def serve(port: int = 0, host: str = "127.0.0.1"):
-    """启动 GUI 服务，返回 (server, url)"""
+    """启动 GUI 服务，返回 (server, url)；url 上携带本次会话 token（见 _AUTH_TOKEN）。"""
+    global _AUTH_TOKEN
     port = port or find_free_port()
+    _AUTH_TOKEN = uuid.uuid4().hex
     srv = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, "http://127.0.0.1:%d/" % port
+    return srv, "http://127.0.0.1:%d/?token=%s" % (port, _AUTH_TOKEN)
 
 
 # ============================ 前端 ============================
@@ -985,9 +1059,27 @@ input{font-family:inherit;font-size:inherit}
   </div>
 </div>
 
+<div class="modal-mask" id="outputMask">
+  <div class="modal" role="dialog" aria-modal="true" style="width:660px;max-width:calc(100vw - 40px)">
+    <div class="modal-title" id="outputTitle">任务输出</div>
+    <pre class="log" id="outputBox" style="height:340px;margin-top:12px;white-space:pre-wrap"></pre>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="outputClose">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (s) => document.querySelector(s);
-const api = (p, opt) => fetch(p, opt).then(r => r.json());
+// 会话令牌：serve() 每次启动随机生成并拼在页面 URL（?token=）上；
+// 所有 /api/* 请求必须带 X-CNA-Token 头，否则后端 403。
+// 防本机其它进程/恶意网页越权调用管理接口（详见后端 _gate）。
+const CNA_TOKEN = new URLSearchParams(location.search).get('token') || '';
+const api = (p, opt) => {
+  opt = opt || {};
+  opt.headers = Object.assign({}, opt.headers, {'X-CNA-Token': CNA_TOKEN});
+  return fetch(p, opt).then(r => r.json());
+};
 const post = (p, body) => api(p, {method:'POST',
   headers:{'Content-Type':'application/json'},
   body: JSON.stringify(body || {})});
@@ -1001,7 +1093,9 @@ const fmtClock = (ts) => {
 let toastTimer = null;
 function toast(msg, ms){
   const el = $('#toast');
-  el.innerHTML = msg;
+  // 安全：msg 可能包含门户/服务端返回的字符串（如认证失败原因），
+  // 必须用 textContent，绝不走 innerHTML（防 XSS 注入管理界面）
+  el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms || 3000);
@@ -1019,6 +1113,16 @@ function confirmDialog({title, html, okText, onOk}){
   $('#modalOk').onclick = () => { close(); onOk && onOk(); };
   mask.onclick = (e) => { if (e.target === mask) close(); };
   $('#modalCancel').focus();
+}
+
+/* ---------- 任务输出对话框（自检/体检结果；textContent 纯文本防注入）---------- */
+function outputDialog(title, text){
+  $('#outputTitle').textContent = title;
+  $('#outputBox').textContent = text;
+  const mask = $('#outputMask');
+  mask.classList.add('show');
+  $('#outputClose').onclick = () => mask.classList.remove('show');
+  mask.onclick = (e) => { if (e.target === mask) mask.classList.remove('show'); };
 }
 
 /* ---------- 窗口控制：优先 pywebview js_api，回退 HTTP ---------- */
@@ -1246,7 +1350,9 @@ async function withTask(url, btn, busyText, doneTitle){
       if (t.status !== 'running'){
         busy(false, btn);
         const ok = t.status === 'done';
-        toast(doneTitle + (ok ? '完成' : '失败') + '，结果已输出到日志', 4200);
+        // 输出同时由后端写入 campusnet.log；这里直接弹窗展示完整结果
+        outputDialog(doneTitle + (ok ? ' · 完成' : ' · 失败'),
+                     (t.output && String(t.output).trim()) || '（无输出）');
         load();
         return;
       }

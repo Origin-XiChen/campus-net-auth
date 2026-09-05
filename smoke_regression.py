@@ -12,8 +12,10 @@ import json
 import time
 import shutil
 import ctypes
+import socket
 import tempfile
 import subprocess
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -23,6 +25,7 @@ sys.path.insert(0, ROOT)
 REPORT = []
 FAILS = []
 BACKUP_RUN = None
+TOKEN = ""  # GUI 服务的会话令牌（启动后从 _ui_trace.log 的 URL 里解析）
 
 
 def rec(msg=""):
@@ -148,6 +151,8 @@ def http(url, method="GET", body=None, timeout=20):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if TOKEN:
+        req.add_header("X-CNA-Token", TOKEN)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read().decode("utf-8", "replace")
@@ -160,8 +165,34 @@ def http(url, method="GET", body=None, timeout=20):
 
 
 def get_text(url, timeout=20):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+    req = urllib.request.Request(url)
+    if TOKEN:
+        req.add_header("X-CNA-Token", TOKEN)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
+
+
+def raw_post(base, path, body=None, token=None, host_hdr=None, timeout=30):
+    """裸 socket POST，返回原始响应字节（用于断言响应段数与状态码）。"""
+    prt = urllib.parse.urlparse(base).port
+    payload = json.dumps(body or {}).encode()
+    lines = ["POST %s HTTP/1.1" % path,
+             "Host: %s" % (host_hdr or ("127.0.0.1:%d" % prt)),
+             "Content-Type: application/json",
+             "Content-Length: %d" % len(payload),
+             "Connection: close"]
+    if token:
+        lines.append("X-CNA-Token: " + token)
+    s = socket.create_connection(("127.0.0.1", prt), timeout=timeout)
+    s.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + payload)
+    buf = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    s.close()
+    return buf
 
 
 # ============================ 主流程 ============================
@@ -275,12 +306,18 @@ def main():
         p.kill()
         return 3
     rec("  [信息] %s（启动耗时已含 onefile 解压）" % url)
+    # URL 上携带会话 token（gui_server 鉴权），API 调用需拆出 base 与 token
+    global TOKEN
+    BASE = url.split("?", 1)[0]
+    TOKEN = urllib.parse.parse_qs(
+        urllib.parse.urlparse(url).query).get("token", [""])[0]
+    check("服务 URL 携带会话 token", bool(TOKEN))
 
     html = get_text(url)
     check("GET / 返回内嵌 UI", "CampusNetAuth · 校园网无感认证" in html)
     check("前端含自启健康警示位", 'id="autostartWarn"' in html)
 
-    st = http(url + "api/status")
+    st = http(BASE + "api/status")
     for k in ("online", "autostart", "autostart_health", "daemon",
               "daemon_pid", "components", "first_deploy", "foreign_files",
               "last_error", "events", "cfg", "host", "interval", "username"):
@@ -288,17 +325,38 @@ def main():
     rec("  [信息] components=%s autostart=%s daemon=%s" %
         (st.get("components"), st.get("autostart"), st.get("daemon")))
 
-    lg = http(url + "api/log?n=20")
+    lg = http(BASE + "api/log?n=20")
     _txt = lg.get("text", "") if isinstance(lg, dict) else ""
     check("GET /api/log?n=20", isinstance(lg, dict) and "text" in lg,
           "尾部: " + _txt.strip().splitlines()[-1][:90] if _txt.strip() else "")
 
-    tk = http(url + "api/task?id=bogus")
+    tk = http(BASE + "api/task?id=bogus")
     check("未知 task id 不崩", isinstance(tk, dict))
+
+    # ========== 2.5 API 契约：鉴权 + 单响应（回归 P0 修复）==========
+    rec("\n===== 2.5 API 契约：鉴权 + 单响应 =====")
+    r = raw_post(BASE, "/api/config", {}, token=None)
+    check("无 token 调用被拒(403)", r.startswith(b"HTTP/1.0 403"),
+          r.split(b"\r\n", 1)[0].decode("utf-8", "replace"))
+    r = raw_post(BASE, "/api/config", {}, token=TOKEN, host_hdr="evil.com")
+    check("非回环 Host 被拒(403)", r.startswith(b"HTTP/1.0 403"))
+    try:
+        get_text(BASE)  # 根页面不带 token
+        check("根页面无 token 被拒(403)", False)
+    except urllib.error.HTTPError as e:
+        check("根页面无 token 被拒(403)", e.code == 403)
+    r = raw_post(BASE, "/api/config", {}, token=TOKEN)
+    check("config 合法调用单响应 200", r.count(b"HTTP/1.0 200 OK") == 1)
+    r = raw_post(BASE, "/api/connect", {}, token=TOKEN)
+    n200 = r.count(b"HTTP/1.0 200 OK")
+    body = r.split(b"\r\n\r\n", 1)[-1].strip()
+    check("connect 恰好一段响应（回归双响应 bug）", n200 == 1, "段数=%d" % n200)
+    check("connect 返回真实结果（非裸 ok:true）", body != b'{"ok": true}',
+          body[:100].decode("utf-8", "replace"))
 
     # ========== 3. 组件状态 ==========
     rec("\n===== 3. 组件安装 / 状态 / 卸载 =====")
-    r = http(url + "api/components/install", "POST", {"name": "daemon"})
+    r = http(BASE + "api/components/install", "POST", {"name": "daemon"})
     rec("  [信息] install daemon -> %s" % r)
     check("daemon 组件安装", r.get("ok") is True, r.get("message", ""))
     check("仅释放 vbs（无 exe 副本）",
@@ -306,23 +364,23 @@ def main():
           and not os.path.exists(
               os.path.join(VERIFY, "CampusNetAuthDaemon.exe")))
     time.sleep(10)
-    st = http(url + "api/status")
+    st = http(BASE + "api/status")
     check("M1 安装即拉起守护", st.get("daemon") is True,
           "pid=%s" % st.get("daemon_pid"))
     rec("  [信息] components=%s" % st.get("components"))
 
-    r = http(url + "api/daemon/stop", "POST")
+    r = http(BASE + "api/daemon/stop", "POST")
     time.sleep(2)
-    st = http(url + "api/status")
+    st = http(BASE + "api/status")
     check("守护优雅停止", r.get("ok") is True and st.get("daemon") is False,
           "port_free=%s" % (not cn.daemon_running()))
 
     # ========== 4. 自启健康检查透出 ==========
     rec("\n===== 4. 自启健康检查（新功能透出）=====")
-    r = http(url + "api/autostart/install", "POST")
+    r = http(BASE + "api/autostart/install", "POST")
     ok_reg = r.get("ok") is True
     check("自启组件安装", ok_reg, r.get("message", ""))
-    st = http(url + "api/status")
+    st = http(BASE + "api/status")
     ah = st.get("autostart_health") or [None, ""]
     rec("  [信息] Run键=%r health=%s" % (reg_read(), ah))
     check("健康时 autostart_health=(True,'')", ah[0] is True and ah[1] == "",
@@ -333,23 +391,23 @@ def main():
     bak = vbs + ".smokebak"
     if os.path.exists(vbs):
         os.rename(vbs, bak)
-        st = http(url + "api/status")
+        st = http(BASE + "api/status")
         ah2 = st.get("autostart_health") or [None, ""]
         rec("  [信息] 负例 health=%s" % (ah2,))
         check("缺失时健康检查报警",
               ah2[0] is False and "丢失" in (ah2[1] or ""), str(ah2))
         os.rename(bak, vbs)
-        st = http(url + "api/status")
+        st = http(BASE + "api/status")
         check("恢复后健康检查转好",
               (st.get("autostart_health") or [None])[0] is True)
 
     # 卸载守卫：自启启用时不得卸值守组件
-    r = http(url + "api/components/uninstall", "POST", {"name": "daemon"})
+    r = http(BASE + "api/components/uninstall", "POST", {"name": "daemon"})
     check("自启启用时拒绝卸值守", r.get("ok") is False, r.get("message", ""))
-    r = http(url + "api/components/uninstall", "POST", {"name": "autostart"})
+    r = http(BASE + "api/components/uninstall", "POST", {"name": "autostart"})
     check("卸自启成功", r.get("ok") is True, r.get("message", ""))
     check("卸自启后 vbs 保留(与值守共用)", os.path.exists(vbs))
-    r = http(url + "api/components/uninstall", "POST", {"name": "daemon"})
+    r = http(BASE + "api/components/uninstall", "POST", {"name": "daemon"})
     check("卸值守成功", r.get("ok") is True, r.get("message", ""))
     check("卸值守后 vbs 移除", not os.path.exists(vbs))
 
@@ -363,7 +421,7 @@ def main():
         time.sleep(1)
     check("主窗口出现", hwnd != 0)
     try:
-        http(url + "api/window", "POST", {"action": "close"})
+        http(BASE + "api/window", "POST", {"action": "close"})
     except Exception as e:
         rec("  [信息] close 请求异常: %r" % e)
     t0 = time.time()

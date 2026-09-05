@@ -134,6 +134,7 @@ HTML 现代 Web 风格（本地 HTTP 服务 + 原生 Edge WebView2 窗口，单�
 | `verify_interval` | `5` | 登录成功后即时确认等待（秒）：防网关"假成功" |
 | `recheck_interval` | `30` | 校外/断网退避期间的环境快探间隔（秒），网络恢复即时响应 |
 | `detect_targets` | 3 个 | 连通性检测目标（HTTP，避免 HTTPS 证书干扰） |
+| `pin_pubkey` | `true` | 门户公钥 pinning（TOFU）：首次登录成功后记住门户 RSA 公钥指纹，之后指纹变化或门户突然不要求加密都会**拒绝发送凭据**；学校换密钥时删 `state.json` 的 `portal_pubkey_fp` 重新锚定 |
 | `log_level` | `INFO` | 日志级别 |
 
 密码**不写进** `config.json`，单独用 **Windows DPAPI** 加密存 `cred.bin`，
