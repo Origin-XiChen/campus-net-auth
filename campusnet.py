@@ -123,6 +123,9 @@ def _cleanup_stale_mei(max_age: float = 3600.0) -> int:
 # 之前执行,静默完成,不依赖日志系统。
 _MEI_CLEANED = _cleanup_stale_mei()
 
+# 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
+APP_VERSION = "0.2.0"
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -676,6 +679,9 @@ class PortalClient:
                     lambda t: http_request("GET", t["host"], 80,
                                            t.get("path", "/"), timeout=ptime),
                     targets))
+        # 透明代理/劫持网关会把任何 host 都回 200：只有带严格 expect 的目标
+        # 才有"已在线"决定权，空 expect 目标只证明"网络可达"
+        strict = any(t.get("expect") for t in targets)
         for t, r in zip(targets, results):
             if r.status < 0:
                 continue
@@ -695,7 +701,10 @@ class PortalClient:
                         return False, m.group(1)
                     continue
                 expect = t.get("expect", "")
-                if not expect or expect in body:
+                if expect and expect in body:
+                    return True, None
+                if not expect and not strict:
+                    # 兜底：配置里没有任何严格 expect 目标时保留旧行为
                     return True, None
         if not any_connected:
             return None, None
@@ -1243,54 +1252,6 @@ def _kill_pid(pid):
             k32.CloseHandle(h)
     except Exception:
         return False
-
-
-def _kill_by_image(image):
-    """终止所有镜像名为 image 的进程（Toolhelp32 快照；零子进程）。
-
-    onefile 模式下，daemon.pid 记录的是 Python 子进程 PID，父级引导进程
-    (PyInstaller bootloader) 仍持有 exe 镜像句柄。停守护时若只杀子进程，
-    父级引导会短暂残留 → 卸载组件的 os.remove 拿到共享锁失败。
-    按镜像名（仅 DAEMON_EXE_NAME，绝不波及主 UI 的 CampusNetAuth.exe）
-    收尾残余进程，让镜像句柄尽快释放。
-    """
-    try:
-        k32 = ctypes.windll.kernel32
-        TH32CS_SNAPPROCESS = 0x2
-        PROCESS_TERMINATE = 0x0001
-        class PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [("dwSize", ctypes.c_uint32), ("cntUsage", ctypes.c_uint32),
-                        ("th32ProcessID", ctypes.c_uint32),
-                        ("th32DefaultHeapID", ctypes.c_void_p),
-                        ("th32ModuleID", ctypes.c_uint32),
-                        ("cntThreads", ctypes.c_uint32),
-                        ("th32ParentProcessID", ctypes.c_uint32),
-                        ("pcPriClassBase", ctypes.c_long),
-                        ("dwFlags", ctypes.c_uint32),
-                        ("szExeFile", ctypes.c_wchar * 260)]
-        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if snap in (0, -1):
-            return 0
-        killed = 0
-        try:
-            pe = PROCESSENTRY32W()
-            pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-            if k32.Process32FirstW(snap, ctypes.byref(pe)):
-                while True:
-                    if pe.szExeFile and pe.szExeFile.lower() == image.lower():
-                        h = k32.OpenProcess(PROCESS_TERMINATE, False,
-                                            pe.th32ProcessID)
-                        if h:
-                            if k32.TerminateProcess(h, 1):
-                                killed += 1
-                            k32.CloseHandle(h)
-                    if not k32.Process32NextW(snap, ctypes.byref(pe)):
-                        break
-        finally:
-            k32.CloseHandle(snap)
-        return killed
-    except Exception:
-        return 0
 
 
 def daemon_pid():
@@ -2394,7 +2355,7 @@ def cmd_logout(args):
 
 
 def cmd_diagnose(args):
-    """门户抓取诊断（融合自 probe/capture_probe.py，常驻监控 + 自动取证）。
+    """门户抓取诊断（常驻监控 + 自动取证）。
 
     入口已完全内置到本 exe：UI 工具箱的「抓取诊断」按钮也会调到这里。
     """
@@ -2440,7 +2401,9 @@ def cmd_stop(args):
 def cmd_ui(args):
     """启动图形管理界面（优先 HTML 版 pywebview，失败回退 tkinter）"""
     try:
-        with open(os.path.join(BASE_DIR, "_ui_trace.log"), "a",
+        # 每次界面启动重置 trace（模式 "w"）：该文件仅供本次运行的冒烟/
+        # 排障使用，追加会让它无限增长；smoke 测试是启动后轮询读取，不受影响。
+        with open(os.path.join(BASE_DIR, "_ui_trace.log"), "w",
                   encoding="utf-8") as f:
             f.write("cmd_ui entered argv=%r frozen=%s\n" %
                     (sys.argv, getattr(sys, "frozen", False)))
@@ -2473,9 +2436,8 @@ def cmd_ui(args):
             f.write("import ui OK; ui.main=%r\n" % ui.main)
     except ImportError as e:
         log.error("无法加载管理界面: %r", e)
-        log.error("请改用包含 tkinter 的 Python，例如：")
-        log.error("  C:\\Users\\XiChen\\AppData\\Local\\Programs\\Python"
-                  "\\Python314\\python.exe campusnet.py ui")
+        log.error("请改用带 tkinter 的 Python 解释器重试"
+                  "（python.org 官方安装包自带 tkinter）")
         return 1
     except Exception as e:
         # 捕获 import 期间的所有异常（含 SyntaxError 等），落盘便于排查
@@ -2584,6 +2546,13 @@ def main():
     #     与 cmd 5.1 / PowerShell 按 ACP 解码子进程字节的行为一致，避免 UTF-8
     #     字节被 GBK 解码成乱码（如 "门户地址" -> "闂ㄦ埛鍦板潃"）。
 
+    # --version 放在 argparse 之前手写处理：frozen(--windowed) 下 stdout 需要
+    # 先 attach_console 才能落到父控制台，argparse 的 action=version 会错过时机
+    if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-V", "version"):
+        attach_console()
+        print("CampusNetAuth " + APP_VERSION)
+        return 0
+
     parser = argparse.ArgumentParser(
         description="校园网无感认证（锐捷 ePortal）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2604,8 +2573,7 @@ def main():
     sub.add_parser("install", help="安装开机自启").set_defaults(func=cmd_install)
     sub.add_parser("uninstall", help="移除开机自启").set_defaults(func=cmd_uninstall)
     p_diag = sub.add_parser("diagnose",
-                            help="门户抓取诊断（持续监控 + 自动取证，"
-                                 "原 probe/capture_probe.py 功能）")
+                            help="门户抓取诊断（持续监控 + 自动取证）")
     p_diag.add_argument("--interval", type=int, default=5,
                         help="轮询间隔（秒，默认 5）")
     p_diag.add_argument("--max-wait", type=int, default=30,

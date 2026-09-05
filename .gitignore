@@ -34,5 +34,8 @@ e2e_result.txt
 probe/capture_result.json
 probe/capture_report.txt
 
+# ===== 构建本机覆盖（含个人路径，绝不提交）=====
+_build_local.bat
+
 # ===== 例外：允许提交的配置模板 =====
 !config.example.json

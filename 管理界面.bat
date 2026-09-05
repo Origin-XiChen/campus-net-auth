@@ -21,11 +21,9 @@ if exist "%EXE%" (
 )
 
 rem Fallback: dev mode via pythonw (no console window)
-set "PY=C:\Users\XiChen\AppData\Local\Programs\Python\Python314\python.exe"
-if not exist "%PY%" set "PY=C:\Users\XiChen\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-if not exist "%PY%" set "PY=python"
+if defined CNA_DEV_PYTHON (set "PY=%CNA_DEV_PYTHON%") else set "PY=python"
 
-set "PYW=C:\Users\XiChen\AppData\Local\Programs\Python\Python314\pythonw.exe"
+set "PYW=%PY:python.exe=pythonw.exe%"
 if not exist "%PYW%" set "PYW=%PY%"
 
 "%PYW%" campusnet.py ui

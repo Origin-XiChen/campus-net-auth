@@ -225,18 +225,25 @@ campus-net-auth/
 ├─ campusnet.log            日志（自动生成）
 ├─ 管理界面.bat / 一键测试.bat / 安装.bat / 卸载自启.bat / 查看状态.bat / 抓取诊断.bat
 ├─ build_exe.bat            一键重新打包（--onefile --windowed）
-└─ probe/                   逆向抓包证据脚本 capture_probe.py
+└─ probe/                   抓包诊断运行输出（capture_result.json 等，自动生成）
 ```
 
 ## 构建（开发者）
 
+构建依赖见 **`requirements-dev.txt`**（exe 运行时零第三方依赖，仅构建需要）：
+`python -m pip install -r requirements-dev.txt` 装进你的构建解释器即可。
+解释器不合适可用环境变量覆盖：`CNA_BUILD_PYTHON`（构建用 python）与
+`CNA_PY_SITE`（PyInstaller 所在 site-packages，一般不用设）。
+本机个性化路径请放 `_build_local.bat`（已被 `.gitignore` 忽略），别写进仓库文件。
+
 双击 **`build_exe.bat`** 一键重建。内部 `python -E -S _pyinst_wrap.py` 启动
 PyInstaller，产物在 `dist\CampusNetAuth.exe`（fresh build），随后复制到项目根。
+exe 版本资源由 `_pyinst_wrap.py` 从 `campusnet.py` 的 `APP_VERSION` 自动生成。
 
 `_pyinst_wrap.py` 的存在原因：本项目的开发环境（WorkBuddy）会在 `sitecustomize`
 中劫持 `os.remove` 到回收站 API，导致 PyInstaller `--clean` 阶段失败但静默退出
 （看似成功、`dist/` 却为空）。`-E -S` 跳过 site.py 使劫持不生效，wrapper 再手动
-把 venv 的 site-packages 加回 `sys.path`。
+把构建解释器的 site-packages 加回 `sys.path`。
 
 日志在 `campusnet.log`，排障先看它。
 

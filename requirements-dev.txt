@@ -1,0 +1,6 @@
+# Build/dev dependencies (the shipped exe itself has zero third-party deps).
+# Install:  python -m pip install -r requirements-dev.txt
+# Versions pinned to the maintainer's build environment; adjust for yours.
+pyinstaller==6.22.2
+pywebview==6.2.1
+pythonnet==3.1.0

@@ -17,10 +17,12 @@ rem Sandbox note: PyInstaller 6.x --clean calls os.remove, which the
 rem WorkBuddy shim redirects to the Recycle Bin API (SHFileOperationW)
 rem and crashes inside the sandbox. We bypass the shim by launching
 rem python with -E -S (skip site.py -> sitecustomize never runs) and
-rem use _pyinst_wrap.py to re-add the venv site-packages to sys.path.
+rem use _pyinst_wrap.py to locate PyInstaller, re-add site-packages
+rem to sys.path, and generate the exe version resource.
 
-set "PY=C:\Users\XiChen\.workbuddy\binaries\python\envs\ui-build\Scripts\python.exe"
-if not exist "%PY%" set "PY=python"
+rem Build python: override with CNA_BUILD_PYTHON, else PATH python.
+rem It must have the build deps installed (see requirements-dev.txt).
+if defined CNA_BUILD_PYTHON (set "PY=%CNA_BUILD_PYTHON%") else set "PY=python"
 
 rem Backup user data (config/cred) before cleaning dist, restore after build,
 rem so upgrading never loses the user's saved settings.

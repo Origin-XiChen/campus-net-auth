@@ -7,9 +7,7 @@ rem NOTE: This script (e2e_test.py) is the legacy end-to-end suite.
 rem The UI "Self-test" button uses "CampusNetAuth.exe test" (lighter scope).
 rem Both stay; pick whichever depth you need.
 
-set "PY=C:\Users\XiChen\AppData\Local\Programs\Python\Python314\python.exe"
-if not exist "%PY%" set "PY=C:\Users\XiChen\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-if not exist "%PY%" set "PY=python"
+if defined CNA_DEV_PYTHON (set "PY=%CNA_DEV_PYTHON%") else set "PY=python"
 
 "%PY%" e2e_test.py
 echo.

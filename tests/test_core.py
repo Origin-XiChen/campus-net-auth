@@ -303,5 +303,64 @@ class TestPubkeyPinning(_StateDirMixin):
         self.assertTrue(m.called)
 
 
+class TestCheckOnline(unittest.TestCase):
+    """check_online 的在线判定：严格 expect 目标才有决定权（防透明代理误判）"""
+
+    T_STRICT = {"host": "msft", "path": "/ct", "expect": "Microsoft"}
+    T_LOOSE = {"host": "baidu", "path": "/", "expect": ""}
+
+    @staticmethod
+    def _resp(status, body=b"", headers=None):
+        return cn.HttpResponse(status, headers or {}, body, "http://mock/")
+
+    def _client(self, targets):
+        cfg = {"portal_host": "172.16.54.18", "portal_port": 80,
+               "detect_targets": targets}
+        return cn.PortalClient(cfg)
+
+    def _with_net(self, targets, responses):
+        """responses: {host: HttpResponse}；按 host 分发 mock http_request"""
+        def fake(method, host, port, path, **kw):
+            return responses[host]
+        client = self._client(targets)
+        with mock.patch.object(cn, "http_request", side_effect=fake):
+            return client.check_online()
+
+    def test_strict_match_is_online(self):
+        r = self._with_net(
+            [self.T_STRICT, self.T_LOOSE],
+            {"msft": self._resp(200, b"Microsoft Connect Test OK"),
+             "baidu": self._resp(200, b"<html>whatever</html>")})
+        self.assertEqual(r, (True, None))
+
+    def test_loose_200_not_decisive_with_strict_present(self):
+        # 透明代理：所有 host 都回 200，但严格目标内容不符 → 不得判在线
+        r = self._with_net(
+            [self.T_STRICT, self.T_LOOSE],
+            {"msft": self._resp(200, b"proxy interstitial page"),
+             "baidu": self._resp(200, b"<html>fake 200</html>")})
+        self.assertEqual(r, (False, None))
+
+    def test_loose_only_keeps_legacy_any_200(self):
+        # 兜底：配置里没有任何严格 expect 目标时，保留"任意 200 即在线"
+        r = self._with_net([self.T_LOOSE],
+                           {"baidu": self._resp(200, b"<html></html>")})
+        self.assertEqual(r, (True, None))
+
+    def test_portal_redirect_reports_hijack(self):
+        r = self._with_net(
+            [self.T_LOOSE],
+            {"baidu": self._resp(302, b"",
+                                  {"Location": "http://172.16.54.18/eportal/"})})
+        self.assertEqual(r[0], False)
+        self.assertIn("172.16.54.18", r[1])
+
+    def test_all_unreachable_is_none(self):
+        r = self._with_net(
+            [self.T_STRICT],
+            {"msft": self._resp(-1, b"err")})
+        self.assertEqual(r, (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,8 +32,7 @@ try:
 except ImportError:  # pragma: no cover
     sys.stderr.write(
         "当前 Python 未包含 tkinter，无法启动管理界面。\n"
-        "请改用带 tkinter 的解释器，例如：\n"
-        "  C:\\Users\\XiChen\\AppData\\Local\\Programs\\Python\\Python314\\python.exe ui.py\n")
+        "请改用带 tkinter 的解释器（python.org 官方安装包自带）后重试。\n")
     raise SystemExit(1)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

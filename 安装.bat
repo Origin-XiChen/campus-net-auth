@@ -16,9 +16,7 @@ if exist "%EXE%" (
   goto :end
 )
 
-set "PY=C:\Users\XiChen\AppData\Local\Programs\Python\Python314\python.exe"
-if not exist "%PY%" set "PY=C:\Users\XiChen\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-if not exist "%PY%" set "PY=python"
+if defined CNA_DEV_PYTHON (set "PY=%CNA_DEV_PYTHON%") else set "PY=python"
 
 echo ============================================================
 echo   CampusNetAuth  -  Setup

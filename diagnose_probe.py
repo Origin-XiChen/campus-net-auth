@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-probe/capture_probe.py — 门户状态持续监控 + 认证过程自动抓取
+diagnose_probe.py — 门户状态持续监控 + 认证过程自动抓取
 
 用途：启动后**常驻运行**，每隔 N 秒轮询一次门户（iHBUT 锐捷 ePortal），
 持续记录状态变化（可达/不可达、在线/未认证），并在以下时机自动取证：
@@ -15,11 +15,11 @@ probe/capture_probe.py — 门户状态持续监控 + 认证过程自动抓取
 门户登录页登录，或使用你自己的方式）。
 
 用法：
-  python probe/capture_probe.py                  # 持续监控，认证完成后出报告并退出
-  python probe/capture_probe.py --keep           # 出报告后继续监控（Ctrl+C 停止）
-  python probe/capture_probe.py --interval 3     # 轮询间隔（秒，默认 5）
-  python probe/capture_probe.py --max-wait 60    # 最长等待认证（分钟，默认 30；0=无限）
-  python probe/capture_probe.py --dry 3          # 只跑 3 轮就输出当前报告（内部自测用）
+  python diagnose_probe.py                  # 持续监控，认证完成后出报告并退出
+  python diagnose_probe.py --keep           # 出报告后继续监控（Ctrl+C 停止）
+  python diagnose_probe.py --interval 3     # 轮询间隔（秒，默认 5）
+  python diagnose_probe.py --max-wait 60    # 最长等待认证（分钟，默认 30；0=无限）
+  python diagnose_probe.py --dry 3          # 只跑 3 轮就输出当前报告（内部自测用）
 
 安全约定：
   * 全程不登录、不读取/写入密码，输出文件绝不包含任何凭据
