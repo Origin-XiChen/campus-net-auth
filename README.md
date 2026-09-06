@@ -277,7 +277,7 @@ CLI 从 cmd 运行时通过 `AttachConsole` 附加父控制台并按代码页输
 | 开机没自动登录 | 跑 `status` 看自启状态；或看 `campusnet.log` 末尾 |
 | 开机弹"Windows Script Host 80070002" | 自启 vbs 找不到同目录 exe（vbs 与 exe 分开存放或 exe 改名）。新版启动器已容错（写 `autostart.log` 不弹窗），UI 也会红条提示 |
 | 界面红色"开机自启将失败"警示条 | 自启链路文件残缺（Run 键 → 启动器 → exe 一环丢失），按提示把 exe 与 vbs 放同一文件夹 |
-| 关闭程序弹"Failed to remove temporary directory" | PyInstaller 退出清理 `_MEI` 解包目录失败，新版已根治（见「即时响应机制」） |
+| 关闭程序弹"Failed to remove temporary directory" | 根因：UI 用 Popen 拉起守护/诊断等同 exe 子进程时，子进程继承了 PyInstaller 的 `_MEIPASS2`/`_PYI*` 阶段标记，误跳过解压、直接复用 UI 的 `_MEI` 临时目录；UI 退出后引导进程删该目录，子进程还映射着其中 `python313.dll` 等文件 → 删除失败弹窗、目录被掏空。已修复：所有同 exe 子进程启动前剥离这些变量（`clean_pyi_env()`），各自解压私有目录。历史残留的 `%TEMP%\_MEI*` 目录在程序全部退出后可手动删除 |
 | 装开机自启报"拒绝访问" | 旧版 `schtasks` 计划任务会被受限环境拒绝；新版用注册表 Run 键（当前用户级，无需管理员）+ VBS 静默启动 |
 | 想换地方存放 | 整个文件夹一起移动（配置都在 exe 旁边），移动后重新 `install` 更新自启路径 |
 | 双击 exe 闪黑色 cmd 窗口 | 不应发生（`--windowed` 打包）。如仍闪，检查是否被 `cmd /c start` 或 bat 间接拉起 |

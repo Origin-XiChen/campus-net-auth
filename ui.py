@@ -1830,16 +1830,19 @@ class App(tk.Tk):
             # 程序）弹出控制台/终端窗口。UI 是 GUI 进程，启动 CUI 子进程时系统
             # 会分配控制台，默认终端为 Windows Terminal 时会闪一个终端窗口。
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            # clean_pyi_env：剥离 _MEIPASS2/_PYI*，自检子进程解压自己的
+            # 私有 _MEI，不与 UI 共享 PyInstaller 临时目录
+            env = cn.clean_pyi_env()
             if getattr(sys, "frozen", False):
                 # 打包态：自检 = 运行自身 exe 的 test 子命令
                 r = subprocess.run([sys.executable, "test"],
                                    capture_output=True, timeout=90,
-                                   creationflags=flags)
+                                   creationflags=flags, env=env)
             else:
                 script = os.path.join(cn.BASE_DIR, "campusnet.py")
                 r = subprocess.run([sys.executable, script, "test"],
                                    capture_output=True, timeout=90,
-                                   creationflags=flags)
+                                   creationflags=flags, env=env)
             out = (r.stdout or b"").decode("utf-8", "replace")
             err = (r.stderr or b"").decode("utf-8", "replace")
             return {"rc": r.returncode, "out": out + err}
@@ -1951,8 +1954,13 @@ class App(tk.Tk):
             else:
                 script = os.path.join(cn.BASE_DIR, "campusnet.py")
                 cmd = [sys.executable, script, "diagnose"]
+            # clean_pyi_env：剥离 _MEIPASS2/_PYI*。诊断是脱离 UI 独立存活的
+            # 长生命周期子进程，绝不能复用 UI 的 PyInstaller 解压临时目录，
+            # 否则 UI 关闭时目录被删会弹 "Failed to remove temporary
+            # directory"，诊断进程的运行时文件也被掏空。
             subprocess.Popen(cmd, cwd=cn.BASE_DIR,
-                             creationflags=flags, close_fds=True)
+                             creationflags=flags, close_fds=True,
+                             env=cn.clean_pyi_env())
             return {"ok": True}
 
         def done(r):

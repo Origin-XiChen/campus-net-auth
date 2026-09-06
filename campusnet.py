@@ -124,7 +124,7 @@ def _cleanup_stale_mei(max_age: float = 3600.0) -> int:
 _MEI_CLEANED = _cleanup_stale_mei()
 
 # 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1180,6 +1180,23 @@ def daemon_running():
 _NO_WINDOW = 0x08000000
 
 
+def clean_pyi_env():
+    """剥离 PyInstaller onefile 的阶段标记环境变量（_MEIPASS2 / _PYI*）。
+
+    onefile 的第一段引导进程拉起第二段（本进程）时会把 _MEIPASS2 写进环境，
+    第二段据此跳过解压、直接用第一段解压好的 _MEI 临时目录。本进程再用
+    Popen 启动同 exe 的子进程（守护 / 诊断）时若原样继承这些变量，子进程的
+    引导器同样会跳过解压、复用本进程的 _MEI 目录。后果：本进程退出后引导
+    进程删除该目录，而子进程仍映射着其中 python313.dll 等文件 → 弹
+    "Failed to remove temporary directory" 警告框，目录被掏空。
+    剥离后子进程解压出自己的私有 _MEI，退出清理互不干扰。
+    """
+    env = dict(os.environ)
+    for k in [k for k in env if k == "_MEIPASS2" or k.startswith("_PYI")]:
+        env.pop(k, None)
+    return env
+
+
 class _MIB_TCPROW_OWNER_PID(ctypes.Structure):
     """MIB_TCPROW_OWNER_PID（IPv4 TCP 连接行，含所属进程 PID）"""
 
@@ -1961,14 +1978,15 @@ def start_daemon():
                      | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                      | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
             subprocess.Popen([exe, "daemon"], cwd=BASE_DIR,
-                             creationflags=flags, close_fds=True)
+                             creationflags=flags, close_fds=True,
+                             env=clean_pyi_env())
         else:
             script = os.path.abspath(__file__)
             subprocess.Popen(
                 [exe, script, "daemon"], cwd=BASE_DIR,
                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-                close_fds=True)
+                close_fds=True, env=clean_pyi_env())
         return True
     except Exception as e:
         log.error("守护启动失败: %r", e)

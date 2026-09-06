@@ -155,8 +155,12 @@ def _spawn(cmd: list, cwd: str = None) -> None:
     flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
              | getattr(subprocess, "DETACHED_PROCESS", 0)
              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    # clean_pyi_env：剥离 _MEIPASS2/_PYI*，防止诊断子进程复用 UI 的
+    # PyInstaller 解压临时目录（UI 退出删目录时会弹
+    # "Failed to remove temporary directory" 且掏空子进程的运行时）。
     subprocess.Popen(cmd, cwd=cwd or cn.BASE_DIR,
-                     creationflags=flags, close_fds=True)
+                     creationflags=flags, close_fds=True,
+                     env=cn.clean_pyi_env())
 
 
 def _start_task(fn) -> str:
@@ -198,7 +202,10 @@ def _task_self_test() -> str:
                "test"]
     # 子进程管道 stdout 默认按系统 locale（GBK）编码；不显式指定 UTF-8，
     # 输出进弹窗后中文会变乱码。解码端再留 GBK 兜底。
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    # clean_pyi_env：剥离 _MEIPASS2/_PYI*，自检子进程解压自己的私有 _MEI，
+    # 不与 UI 共享临时目录（避免退出清理互相干扰）。
+    env = cn.clean_pyi_env()
+    env["PYTHONIOENCODING"] = "utf-8"
     r = subprocess.run(cmd, capture_output=True, timeout=120,
                        creationflags=flags, cwd=cn.BASE_DIR, env=env)
     return _decode_subprocess_output(r.stdout) + \
