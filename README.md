@@ -45,7 +45,6 @@
 ## 面向校园
 
 **湖北工业大学 iHBUT**（Hubei University of Technology）校园网。
-注意与河北工业大学缩写相同（均为 HBUT），本项目统一写作 **iHBUT**，勿混用。
 
 ## 功能特性
 
