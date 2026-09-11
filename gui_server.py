@@ -391,6 +391,19 @@ class Handler(BaseHTTPRequestHandler):
                             "components": cn.components_status()})
             elif path == "/api/self-test":
                 self._json({"id": _start_task(_task_self_test)})
+            elif path == "/api/notify-test":
+                # 双通道通知自检：
+                #   ① 本进程（界面）发系统通知 —— 验证前端在场时的通道；
+                #   ② 经控制通道让守护进程自己发 —— 验证前端不在时的通道。
+                # 前端还会另外弹一次界面气泡（①②之外的第三条通道）。
+                # dedup=False：测试必须每次都能看到效果，不能被去重吃掉。
+                ui_ok = cn.notify_system(
+                    "校园网无感认证（界面）",
+                    "通知测试：看到这条说明界面进程的通知通道正常",
+                    dedup=False)
+                d_ok, d_msg = cn.notify_daemon_test()
+                self._json({"ok": True, "ui_ok": bool(ui_ok),
+                            "daemon_ok": bool(d_ok), "daemon_msg": d_msg})
             elif path == "/api/health":
                 self._json({"id": _start_task(_task_health)})
             elif path == "/api/diagnose":
@@ -936,7 +949,7 @@ input{font-family:inherit;font-size:inherit}
       <section class="page" id="page-auto">
         <div class="card">
           <div class="card-title">工具箱</div>
-          <div class="card-sub">一键自检 · 体检 · 自启管理 · 抓取诊断（原 .bat 已全部内置）</div>
+          <div class="card-sub">一键自检 · 体检 · 自启管理 · 抓取诊断 · 通知测试（原 .bat 已全部内置）</div>
           <div class="btn-row" style="margin-top:16px">
             <button class="btn btn-primary" id="btnSelfTest">自检</button>
             <button class="btn btn-primary" id="btnHealth">一键体检</button>
@@ -944,6 +957,7 @@ input{font-family:inherit;font-size:inherit}
           </div>
           <div class="btn-row" style="margin-top:10px">
             <button class="btn btn-ghost" id="btnDiagnose">抓取诊断</button>
+            <button class="btn btn-ghost" id="btnNotifyTest">通知测试</button>
             <span class="hint">登录 Windows 即自动守护，全程无窗口</span>
           </div>
         </div>
@@ -1111,6 +1125,9 @@ const fmtClock = (ts) => {
 };
 
 let toastTimer = null;
+// 门户认证异常自愈事件的"已提醒"时间戳：同一条事件只弹一次界面气泡，
+// 避免守护持续探测期间重复弹窗
+let lastFixToastT = 0;
 function toast(msg, ms){
   const el = $('#toast');
   // 安全：msg 可能包含门户/服务端返回的字符串（如认证失败原因），
@@ -1305,12 +1322,14 @@ async function load(){
   } else {
     leEl.style.display = 'none';
   }
-  // 最近状态事件（掉线/重连/恢复/登录结果）即时展示，最多 3 条
+  // 最近状态事件（掉线/重连/恢复/登录结果/门户异常自愈）即时展示，最多 3 条
   const evtEl = $('#evtBar');
   const evts = st.events || [];
   if (evts.length){
     const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
-                     login_ok:'ok', login_fail:'err', kickout:'warn'};
+                     login_ok:'ok', login_fail:'err', kickout:'warn',
+                     portal_fix:'warn'};
+    const EVT_MARK = {err:'✕', portal_fix:'⚠'};
     const items = evts.slice(-3).reverse().map(ev => {
       const d = new Date(ev.t * 1000);
       const ts = String(d.getHours()).padStart(2,'0') + ':' +
@@ -1318,11 +1337,19 @@ async function load(){
       const msg = String(ev.msg || '').replace(/[<>&"']/g,
         c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
       return '<span class="evt-item ' + (EVT_CLS[ev.kind] || '') + '">'
-        + '<b>' + (EVT_CLS[ev.kind] === 'err' ? '✕' : '✓') + '</b>'
+        + '<b>' + (EVT_MARK[EVT_CLS[ev.kind]] || '✓') + '</b>'
         + msg + '<i>' + ts + '</i></span>';
     }).join('');
     evtEl.innerHTML = '<span class="evt-cap">最近动态</span>' + items;
     evtEl.style.display = 'flex';
+    // 门户认证异常自愈（守护自动下线重登）：同步弹一次界面气泡，
+    // 与系统右下角通知形成双通道；按事件时间戳去重，只弹一次
+    const fixes = evts.filter(e => e.kind === 'portal_fix');
+    const lastFix = fixes.length ? fixes[fixes.length - 1] : null;
+    if (lastFix && lastFix.t > lastFixToastT){
+      lastFixToastT = lastFix.t;
+      toast('检测到门户认证异常，已自动退出并重新认证', 4500);
+    }
   } else {
     evtEl.style.display = 'none';
   }
@@ -1419,6 +1446,21 @@ $('#btnOpenDir').onclick = () => post('/api/open-dir');
 $('#btnDiagnose').onclick = async () => {
   await post('/api/diagnose');
   toast('抓取诊断已在后台启动，报告将写入 probe/capture_result.json', 4600);
+};
+// 通知测试：三条通道一次测完
+//   ① 界面气泡（前端自己弹，就是下面这条）
+//   ② 界面进程的系统通知（后端本进程发）
+//   ③ 守护进程的系统通知（经控制通道让守护自己发，验证无人值守场景）
+$('#btnNotifyTest').onclick = async () => {
+  toast('通知测试 ① · 界面气泡：看到这条即正常', 3000);
+  let r;
+  try { r = await post('/api/notify-test'); }
+  catch(e){ toast('通知测试失败：' + e, 4200); return; }
+  const d = r.daemon_ok
+    ? '③ 守护通知 ✓'
+    : '③ 守护通知 ✗（' + (r.daemon_msg || '未知原因') + '）';
+  toast('通知测试：② 界面通知 ' + (r.ui_ok ? '✓' : '✗') + '　' + d
+        + '　请查看屏幕右下角', 7000);
 };
 $('#btnSelfTest').onclick = () => withTask('/api/self-test', $('#btnSelfTest'), '自检中…', '自检');
 $('#btnHealth').onclick = () => {

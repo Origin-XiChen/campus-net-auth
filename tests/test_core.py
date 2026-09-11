@@ -362,5 +362,166 @@ class TestCheckOnline(unittest.TestCase):
         self.assertEqual(r, (None, None))
 
 
+class TestStaleSessionRecovery(unittest.TestCase):
+    """残留会话自愈（学校门户偶发：登录返回 success 但会话未生效）。
+
+    现场症状：认证"成功"却上不了网、账号页有效期显示 1970 之类异常值，
+    守护若直接重登会陷入无效死循环 → 必须先 logout 清掉残留会话。
+    """
+
+    def test_logout_ok_passes_user_index_and_cred(self):
+        calls = {}
+
+        class FakePortal:
+            def logout(self, ui=None, force_by_cred=False,
+                       username=None, password=None):
+                calls.update(ui=ui, force=force_by_cred, user=username)
+                return {"result": "success", "message": "注销成功"}
+
+        ok, detail = cn.logout_stale_session(
+            FakePortal(), "IDX123", "2510331221", "pw")
+        self.assertTrue(ok)
+        self.assertEqual(calls["ui"], "IDX123")
+        self.assertTrue(calls["force"])
+        self.assertIn("注销成功", detail)
+
+    def test_logout_fail_result_reported(self):
+        class FakePortal:
+            def logout(self, *a, **kw):
+                return {"result": "fail", "message": "用户已下线"}
+
+        ok, detail = cn.logout_stale_session(FakePortal(), None, "u", "p")
+        self.assertFalse(ok)
+        self.assertIn("已下线", detail)
+
+    def test_logout_exception_is_swallowed(self):
+        class FakePortal:
+            def logout(self, *a, **kw):
+                raise RuntimeError("portal boom")
+
+        ok, detail = cn.logout_stale_session(FakePortal(), None, "u", "p")
+        self.assertFalse(ok)
+        self.assertIn("boom", detail)
+
+    def test_logout_uses_cred_fallback_when_no_index(self):
+        """没有 userIndex 时必须走"账号密码"兜底下线，否则残留会话清不掉。"""
+        seen = {}
+
+        class FakePortal:
+            def logout(self, ui=None, force_by_cred=False,
+                       username=None, password=None):
+                seen.update(ui=ui, force=force_by_cred,
+                            username=username, password=password)
+                return {"result": "success", "message": "ok"}
+
+        cn.logout_stale_session(FakePortal(), None, "2510331221", "secret")
+        self.assertIsNone(seen["ui"])
+        self.assertTrue(seen["force"])
+        self.assertEqual(seen["username"], "2510331221")
+        self.assertEqual(seen["password"], "secret")
+
+
+class TestSystemNotify(unittest.TestCase):
+    """右下角系统通知：去重与派发（不真正弹窗，线程被替换为假实现）。"""
+
+    def setUp(self):
+        cn._notify_last.clear()
+
+    def tearDown(self):
+        cn._notify_last.clear()
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "通知实现仅 Windows")
+    def test_dedup_same_content_within_window(self):
+        made = []
+
+        class FakeThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                made.append(args)
+
+            def start(self):
+                pass
+
+        with mock.patch.object(cn, "threading",
+                               mock.Mock(Thread=FakeThread)):
+            r1 = cn.notify_system("t1", "m1")
+            r2 = cn.notify_system("t1", "m1")
+            r3 = cn.notify_system("t1", "m2")
+        self.assertTrue(r1)
+        self.assertFalse(r2, "同内容 60s 内应去重")
+        self.assertTrue(r3, "不同内容应放行")
+        self.assertEqual(len(made), 2)
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "通知实现仅 Windows")
+    def test_dispatch_failure_returns_false(self):
+        with mock.patch.object(cn.threading, "Thread",
+                               side_effect=RuntimeError("no thread")):
+            self.assertFalse(cn.notify_system("t", "m"))
+
+
+class TestNotifyDaemonTest(unittest.TestCase):
+    """守护通道通知测试（界面不在时的通知链路，走 47667 控制通道 + 回执）。"""
+
+    def test_no_daemon_returns_false(self):
+        with mock.patch.object(cn.socket, "create_connection",
+                               side_effect=ConnectionRefusedError()):
+            ok, msg = cn.notify_daemon_test()
+        self.assertFalse(ok)
+        self.assertIn("守护未运行", msg)
+
+    def test_sends_notify_and_accepts_ack(self):
+        sent = []
+
+        class FakeSock:
+            def sendall(self, b):
+                sent.append(b)
+
+            def recv(self, n):
+                return b"OK"
+
+            def close(self):
+                pass
+
+        with mock.patch.object(cn.socket, "create_connection",
+                               return_value=FakeSock()):
+            ok, msg = cn.notify_daemon_test()
+        self.assertTrue(ok)
+        self.assertEqual(sent, [b"NOTIFY"])
+        self.assertIn("已发送", msg)
+
+    def test_missing_ack_reports_false(self):
+        class FakeSock:
+            def sendall(self, b):
+                pass
+
+            def recv(self, n):
+                raise TimeoutError("no ack")
+
+            def close(self):
+                pass
+
+        with mock.patch.object(cn.socket, "create_connection",
+                               return_value=FakeSock()):
+            ok, msg = cn.notify_daemon_test()
+        self.assertFalse(ok)
+        self.assertIn("未回执", msg)
+
+    def test_unexpected_ack_reports_false(self):
+        class FakeSock:
+            def sendall(self, b):
+                pass
+
+            def recv(self, n):
+                return b"??"
+
+            def close(self):
+                pass
+
+        with mock.patch.object(cn.socket, "create_connection",
+                               return_value=FakeSock()):
+            ok, msg = cn.notify_daemon_test()
+        self.assertFalse(ok)
+        self.assertIn("回执异常", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -83,7 +83,7 @@ VSVersionInfo(
         StringStruct('FileDescription', 'Campus network silent authentication tool (ePortal/SAM+)'),
         StringStruct('FileVersion', '%(v)s'),
         StringStruct('InternalName', 'CampusNetAuth'),
-        StringStruct('LegalCopyright', 'MIT License'),
+        StringStruct('LegalCopyright', 'GPL-3.0 (see LICENSE)'),
         StringStruct('OriginalFilename', 'CampusNetAuth.exe'),
         StringStruct('ProductName', 'CampusNetAuth'),
         StringStruct('ProductVersion', '%(v)s')
@@ -93,7 +93,15 @@ VSVersionInfo(
   ]
 )
 """ % {"fv": "(%s)" % ", ".join(str(n) for n in nums), "v": ver}
-    vfile = os.path.join(here, "build", "version_info.txt")
+    # 版本文件与 --workpath 同目录（构建输出集中，避免与源码根混淆）；
+    # 绝对路径传给 --version-file，故与 --specpath 无关、始终能找到。
+    wp = "build"
+    if "--workpath" in sys.argv:
+        i = sys.argv.index("--workpath")
+        if i + 1 < len(sys.argv):
+            wp = sys.argv[i + 1]
+    wp = wp if os.path.isabs(wp) else os.path.join(here, wp)
+    vfile = os.path.join(wp, "version_info.txt")
     os.makedirs(os.path.dirname(vfile), exist_ok=True)
     with open(vfile, "w", encoding="ascii") as f:
         f.write(tpl)

@@ -29,6 +29,7 @@ import logging
 import argparse
 import shutil
 import subprocess
+import threading
 import http.client
 import urllib.parse
 import contextlib
@@ -124,7 +125,7 @@ def _cleanup_stale_mei(max_age: float = 3600.0) -> int:
 _MEI_CLEANED = _cleanup_stale_mei()
 
 # 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1103,6 +1104,219 @@ def record_event(kind, msg):
         save_state(st)
 
 
+# ============================ 系统通知（右下角） ============================
+# 守护是无人值守进程，用户不会盯着日志；关键异常（如门户认证异常自动修复）
+# 需要让用户"看得见"一次。这里用托盘气球通知（Win10/11 自动转为右下角
+# 系统通知并进入通知中心），纯 ctypes 实现、零第三方依赖、零子进程。
+
+NOTIFY_AUMID = "CampusNetAuth.Tray"
+_NOTIFY_FLAG = {"aumid_set": False, "lock": None}
+_NOTIFY_CLS = {"atom": 0, "cls": None, "proc": None}
+# 同标题+正文的通知节流（秒）：避免异常持续时刷屏
+NOTIFY_DEDUP_SEC = 60
+_notify_last = {}
+
+
+def _ensure_notify_aumid():
+    """设置进程级 AppUserModelID —— Win10 1607+ / Win11 的硬性前提。
+
+    没有 AUMID 的进程调用 Shell_NotifyIcon 发气球通知会被系统**静默丢弃**
+    （既不显示、也不进通知中心，API 却返回成功），这是本项目踩过的坑。
+    同一进程只需设置一次；失败不抛异常（退化为"通知不可见"，不影响认证）。
+    """
+    if _NOTIFY_FLAG["aumid_set"] or not sys.platform.startswith("win"):
+        return
+    try:
+        if _NOTIFY_FLAG["lock"] is None:
+            _NOTIFY_FLAG["lock"] = 1
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            ctypes.c_wchar_p(NOTIFY_AUMID))
+        _NOTIFY_FLAG["aumid_set"] = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _notify_worker(title, message, timeout=10):
+    """通知工作线程：注册消息窗口 → 加托盘图标 → 弹通知 → 延时清理。
+
+    全部包在 try 里：任何一步失败都静默退出（通知只是锦上添花，绝不能
+    因为托盘 API 异常影响守护循环或留下残留图标/窗口）。
+    """
+    _ensure_notify_aumid()
+    try:
+        import ctypes.wintypes as _wt
+        user32 = ctypes.windll.user32
+        shell32 = ctypes.windll.shell32
+        kernel32 = ctypes.windll.kernel32
+
+        NIM_ADD, NIM_MODIFY, NIM_DELETE = 0x0, 0x1, 0x2
+        NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x1, 0x2, 0x4, 0x10
+        NIIF_INFO = 0x1
+        IDI_INFORMATION = 32516
+        WM_USER, WM_DESTROY = 0x0400, 0x0002
+        HWND_MESSAGE = _wt.HWND(-3)
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, _wt.HWND, _wt.UINT,
+                                     _wt.WPARAM, _wt.LPARAM)
+
+        class _WNDCLASSW(ctypes.Structure):
+            _fields_ = [
+                ("style", _wt.UINT), ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", _wt.HINSTANCE), ("hIcon", _wt.HICON),
+                ("hCursor", _wt.HANDLE), ("hbrBackground", _wt.HBRUSH),
+                ("lpszMenuName", _wt.LPCWSTR), ("lpszClassName", _wt.LPCWSTR),
+            ]
+
+        class _NID(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", _wt.DWORD), ("hWnd", _wt.HWND),
+                ("uID", _wt.UINT), ("uFlags", _wt.UINT),
+                ("uCallbackMessage", _wt.UINT), ("hIcon", _wt.HICON),
+                ("szTip", _wt.WCHAR * 128), ("dwState", _wt.DWORD),
+                ("dwStateMask", _wt.DWORD), ("szInfo", _wt.WCHAR * 256),
+                ("uTimeout", _wt.UINT), ("szInfoTitle", _wt.WCHAR * 64),
+                ("dwInfoFlags", _wt.DWORD), ("guidItem", ctypes.c_byte * 16),
+                ("hBalloonIcon", _wt.HICON),
+            ]
+
+        user32.DefWindowProcW.restype = LRESULT
+        user32.DefWindowProcW.argtypes = [_wt.HWND, _wt.UINT, _wt.WPARAM,
+                                          _wt.LPARAM]
+
+        def _proc(hwnd, msg, wparam, lparam):
+            if msg == WM_DESTROY:
+                user32.PostQuitMessage(0)
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        cb = WNDPROC(_proc)
+        hinst = kernel32.GetModuleHandleW(None)
+        cls = "CampusNetAuthNotify"
+        wc = _WNDCLASSW()
+        wc.lpfnWndProc = cb
+        wc.hInstance = hinst
+        wc.lpszClassName = cls
+        atom = user32.RegisterClassW(ctypes.byref(wc))
+        if not atom:
+            return
+        hwnd = user32.CreateWindowExW(0, cls, cls, 0, 0, 0, 0, 0,
+                                      HWND_MESSAGE, None, hinst, None)
+        if not hwnd:
+            return
+
+        nid = _NID()
+        nid.cbSize = ctypes.sizeof(_NID)
+        nid.hWnd = hwnd
+        nid.uID = 1
+        nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE
+        nid.uCallbackMessage = WM_USER + 1
+        nid.hIcon = user32.LoadIconW(None, _wt.LPCWSTR(IDI_INFORMATION))
+        nid.szTip = APP_NAME
+        if not shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid)):
+            user32.DestroyWindow(hwnd)
+            return
+        try:
+            nid.uFlags = NIF_INFO
+            nid.dwInfoFlags = NIIF_INFO
+            nid.uTimeout = max(5, int(timeout)) * 1000
+            nid.szInfoTitle = str(title)[:63]
+            nid.szInfo = str(message)[:255]
+            shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+            # 保持图标 + 消息泵存活，确保通知送达并被系统登记
+            msg = _wt.MSG()
+            t0 = time.time()
+            while time.time() - t0 < max(3, int(timeout)) + 2:
+                while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageW(ctypes.byref(msg))
+                time.sleep(0.05)
+        finally:
+            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+            user32.DestroyWindow(hwnd)
+    except Exception as e:  # noqa: BLE001
+        log.debug("系统通知发送失败（已忽略）: %r", e)
+
+
+def logout_stale_session(client, user_index, username, password):
+    """主动下线，用于清理门户侧的"残留会话"。
+
+    背景：学校门户偶发异常时会出现"登录返回 success、但会话并未真正生效"
+    （账号页有效期可能显示 1970 之类的异常值）。此时上一次的失效会话仍挂在
+    门户上，直接重登会被当作"已在线"而无效，必须先把残留会话注销掉。
+
+    返回 (ok, detail)：ok 表示门户确认下线；任何异常都被吞掉（返回 False），
+    绝不让清理动作影响到守护循环。
+    """
+    try:
+        r = client.logout(user_index, force_by_cred=True,
+                          username=username, password=password)
+        ok = (isinstance(r, dict)
+              and str(r.get("result", "")).lower() == "success")
+        return ok, safe_message(r)
+    except Exception as e:  # noqa: BLE001
+        return False, "下线异常: %r" % e
+
+
+def notify_system(title, message, timeout=10, dedup=True):
+    """右下角系统通知（后台线程执行，立即返回，绝不阻塞守护循环）。
+
+    dedup=True 时，同标题+正文在 NOTIFY_DEDUP_SEC 内只弹一次，
+    避免"异常持续期间"刷屏。返回 True 表示已派发（不代表一定能显示）。
+    """
+    if not sys.platform.startswith("win"):
+        return False
+    key = (str(title), str(message))
+    if dedup:
+        now = time.time()
+        if now - _notify_last.get(key, 0) < NOTIFY_DEDUP_SEC:
+            return False
+        _notify_last[key] = now
+        if len(_notify_last) > 32:  # 防无界增长
+            for k in list(_notify_last)[:-16]:
+                _notify_last.pop(k, None)
+    try:
+        t = threading.Thread(target=_notify_worker,
+                             args=(title, message, timeout), daemon=True)
+        t.start()
+        log.info("已发送系统通知：%s - %s", title, message)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.debug("系统通知线程启动失败（已忽略）: %r", e)
+        return False
+
+
+def notify_daemon_test(timeout=3.0):
+    """让「守护进程」发一条测试通知 —— 验证"界面不在"时的通知通道。
+
+    为什么需要单独测：通知是**按进程**发的（AUMID、托盘图标都挂在发出进程
+    上），界面能弹不代表无人值守的守护也能弹。这里通过守护控制通道发
+    NOTIFY 指令，由守护在自己的进程里调用 notify_system 并回执 "OK"。
+
+    返回 (ok, detail)。
+    """
+    try:
+        s = socket.create_connection(("127.0.0.1", SINGLETON_PORT),
+                                     timeout=timeout)
+    except OSError as e:
+        return False, "守护未运行（控制通道不可用：%s）" % e.__class__.__name__
+    try:
+        s.sendall(b"NOTIFY")
+        try:
+            ack = s.recv(16).decode("utf-8", "replace").strip()
+        except OSError:
+            return False, "守护未回执（可能正忙于本轮探测，请稍后重试）"
+        if ack.upper() == "OK":
+            return True, "守护已发送测试通知"
+        return False, "守护回执异常：%r" % ack
+    except OSError as e:
+        return False, "指令发送失败：%s" % e.__class__.__name__
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
 def acquire_singleton():
     """防止守护进程重复启动"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1435,11 +1649,15 @@ def run_daemon(cfg, cred):
     persisted_index = None  # 已写入 state.json 的 userIndex，避免重复写盘
     last_keepalive = 0.0   # 上次 keepalive 续约时间（主动防踢）
     prev_online = None     # 上一轮探测结果，用于状态翻转事件去重
+    # ---- 残留会话自愈（学校门户偶发：登录返回 success 但会话未生效）----
+    stale_streak = 0       # 连续触发次数（>=3 时退避，避免高频敲门户）
+    stale_notified = False  # 本段异常期是否已提醒过（每次异常只提醒一次）
 
     # ---- 运行统计与心跳节流 ----
     started_at = time.time()
     stats = {"loops": 0, "login_ok": 0, "login_fail": 0,
-             "reconnects": 0, "state_flips": 0, "keepalive_ok": 0}
+             "reconnects": 0, "state_flips": 0, "keepalive_ok": 0,
+             "stale_recover": 0}
     last_info = None  # 上次登录成功的 (IP, 服务)，用于检测网络身份变化
     last_heartbeat = 0.0
     HB_INTERVAL = 300  # 心跳日志节流：每 5 分钟一条
@@ -1471,7 +1689,8 @@ def run_daemon(cfg, cred):
     import select as _select
 
     def _wait(sec):
-        """可中断等待：阻塞至超时或收到指令（STOP=优雅退出 / CHECK=唤醒复核）。
+        """可中断等待：阻塞至超时或收到指令
+        （STOP=优雅退出 / CHECK=唤醒复核 / NOTIFY=发测试通知）。
 
         select 可被 socket 数据即时打断，比 time.sleep 多了"立即响应"能力：
         UI 手动操作后发 CHECK，等待中的守护立刻醒来复核，不等完整周期。
@@ -1480,6 +1699,9 @@ def run_daemon(cfg, cred):
         截断等待——否则 UI 每 20s 轮询一次 /api/status 就把守护提前唤醒做
         一整轮探测，interval 检测周期名存实亡、公网探测目标被白打。空数据
         或未知指令一律吞掉、继续等剩余时间；只有 STOP / CHECK 才真正打断。
+
+        NOTIFY 也不打断等待（只借这条通道让"守护进程自己"发一条通知，
+        用于验证无人值守时的通知通道），处理完继续等剩余时间。
         """
         deadline = time.time() + max(0.0, float(sec))
         while True:
@@ -1493,6 +1715,18 @@ def run_daemon(cfg, cred):
                 _conn, _ = lock.accept()
                 try:
                     _data = _conn.recv(16).decode("utf-8", "replace").strip().upper()
+                    if _data == "NOTIFY":
+                        # 通知测试：由守护进程自己发出（模拟"界面不在"的
+                        # 无人值守场景），验证托盘通知通道是否被系统放行
+                        log.info("收到通知测试指令，守护发送测试通知")
+                        notify_system(
+                            "校园网无感认证（守护）",
+                            "通知测试：看到这条说明无人值守通知通道正常",
+                            dedup=False)
+                        try:
+                            _conn.sendall(b"OK")  # 回执：让调用方确认真被处理
+                        except OSError:
+                            pass
                 finally:
                     _conn.close()
             except Exception:
@@ -1558,6 +1792,9 @@ def run_daemon(cfg, cred):
                 if fail_streak:
                     log.info("网络已恢复")
                 fail_streak = 0
+                # 已在线：复位残留会话自愈计数（下次异常可再提醒一次）
+                stale_streak = 0
+                stale_notified = False
                 # 持久化当前 userIndex，便于 logout 命令在"开机即在线"时也能用
                 try:
                     info = client.interface("getOnlineUserInfo")
@@ -1661,8 +1898,39 @@ def run_daemon(cfg, cred):
                     return 0
                 _online3, _ = client.check_online()
                 if _online3 is False:
-                    log.info("登录后复核未通过（会话未生效），立即补登…")
+                    # 门户说"登录成功"、实际仍未认证 —— 典型"残留会话"
+                    # （学校门户偶发：账号页有效期显示 1970 之类的异常值，
+                    # 上次的失效会话还挂在门户上）。此时**直接重登是无效的**：
+                    # 门户认为该账号已在线，返回 success 但不建立新会话，
+                    # 于是陷入"每 5 秒登录一次却永远上不了网"的死循环。
+                    # 处置：先主动下线清掉残留会话，下一轮再重新认证。
+                    stale_streak += 1
+                    stats["stale_recover"] += 1
+                    log.warning("登录后复核未通过（疑似门户残留会话/认证异常，"
+                                "连续第 %d 次），先主动下线清理再重新认证…",
+                                stale_streak)
+                    _lo_ok, _lo_msg = logout_stale_session(
+                        client, res.get("userIndex"), username, cred)
+                    log.info("主动下线（清理残留会话）%s：%s",
+                             "成功" if _lo_ok else "未成功", _lo_msg)
+                    if not stale_notified:
+                        # 同一段异常期内只提醒一次，避免刷屏
+                        stale_notified = True
+                        record_event("portal_fix",
+                                     "检测到门户认证异常，已自动退出并重新认证")
+                        notify_system(
+                            "校园网认证异常",
+                            "检测到门户认证异常，已自动退出并重新认证")
+                    # 连续多次仍失败说明不是残留会话问题（如账号被限制），
+                    # 按失败次数退避，别高频敲门户
+                    backoff = (min(retry * stale_streak, max_interval)
+                               if stale_streak >= 3 else 2)
+                    if _wait(backoff) == "STOP":
+                        return 0
                     continue
+                # 复核通过：清空残留会话自愈计数（下次异常可再提醒一次）
+                stale_streak = 0
+                stale_notified = False
                 if _wait(interval) == "STOP":
                     return 0
             else:
@@ -1689,10 +1957,12 @@ def run_daemon(cfg, cred):
         except KeyboardInterrupt:
             log.info("守护被手动终止")
             log.info("守护退出 | 已运行 %s | 循环 %d 次 | 登录成功=%d | "
-                     "登录失败=%d | 自动重连=%d | 网络状态切换=%d",
+                     "登录失败=%d | 自动重连=%d | 网络状态切换=%d | "
+                     "残留会话自愈=%d",
                      _fmt_uptime(time.time() - started_at),
                      stats["loops"], stats["login_ok"], stats["login_fail"],
-                     stats["reconnects"], stats["state_flips"])
+                     stats["reconnects"], stats["state_flips"],
+                     stats["stale_recover"])
             return 0
         except Exception as e:
             fail_streak += 1
