@@ -32,9 +32,8 @@ e2e_result.txt
 HANDOVER.md
 
 # ===== 单测 / 构建临时产物（跑测试与打包时会自动生成）=====
-_test_state_*.json
-_test_state_*.json.lock
-_test_config_*.json
+_test_state_*
+_test_config_*
 file_version_info.txt
 ._last_build_ts
 _t_*.py
@@ -42,6 +41,7 @@ _t_*.js
 _t_*.html
 _t_*.txt
 _t_*.md
+_t_fixtures/
 
 # ===== 抓包证据（只保留脚本，排除抓包结果）=====
 probe/capture_result.json

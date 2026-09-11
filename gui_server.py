@@ -103,6 +103,7 @@ def _status_payload() -> dict:
     foreign = cn.foreign_files()
     if cn.FIRST_DEPLOY:
         cn.mark_first_run()
+    dc = _daemon_check()      # 纯内存读；重算在后台线程/renew 端点里做
     return {
         "online": online,
         "info": info,
@@ -124,7 +125,113 @@ def _status_payload() -> dict:
         "last_error": cn.load_state().get("last_error"),
         # 最近状态事件（掉线/重连/恢复/登录结果），守护状态翻转时写入
         "events": cn.load_state().get("events") or [],
+        # ---- 守护版本体检（升级自愈）----
+        # 守护是"同一个 exe + daemon 参数"，换 exe 后**已运行的守护**仍是旧代码；
+        # 界面据此提示/自动重启，避免用户以为升级了、实际新功能没生效。
+        "daemon_version": dc.get("version"),
+        "daemon_stale": bool(dc.get("stale")),
+        "daemon_stale_reason": dc.get("reason", ""),
+        "daemon_refreshed": bool(dc.get("refreshed")),
+        # 程序目录里发现了更高版本的 exe（用户把下载的文件丢进来了）
+        "upgrade": ({"version": dc.get("upgrade_version"),
+                     "name": os.path.basename(dc.get("upgrade") or "")}
+                    if dc.get("upgrade") else None),
+        "app_version": cn.APP_VERSION,
     }
+
+
+# ---- 守护体检缓存 ----
+# ⚠️ 绝不能把 daemon_stale() 直接放进 /api/status 的请求路径：控制通道握手
+# 在"守护正忙于一轮探测"时最长要等 3s，而状态是 1s 级轮询的。这里统一走
+# 60s TTL 缓存 + 后台异步重算，请求路径永远是纯内存读。
+_DAEMON_CHECK = {"t": 0.0, "stale": False, "version": None, "reason": "",
+                 "upgrade": None, "upgrade_version": None,
+                 "refreshed": False, "refresh_reason": ""}
+_DAEMON_CHECK_TTL = 60.0
+_DAEMON_CHECK_LOCK = threading.Lock()
+_DAEMON_CHECK_BUSY = [False]
+
+
+def _run_daemon_check(force_refresh=False) -> dict:
+    """真正跑一次守护体检（会访问控制通道，可能耗时数秒）——只在后台线程调用。"""
+    refreshed, reason = False, ""
+    try:
+        refreshed, reason = cn.ensure_daemon_fresh(force=force_refresh)
+    except Exception as e:  # noqa: BLE001
+        cn.log.warning("守护版本自愈失败: %r", e)
+    try:
+        up, up_ver = cn.find_upgrade_candidate()
+    except Exception as e:  # noqa: BLE001
+        cn.log.warning("扫描升级候选失败: %r", e)
+        up, up_ver = None, None
+    try:
+        stale, ver, why = cn.daemon_stale()
+    except Exception as e:  # noqa: BLE001
+        stale, ver, why = False, None, "%r" % e
+    out = {"t": time.time(), "stale": bool(stale), "version": ver,
+           "reason": why, "upgrade": up, "upgrade_version": up_ver,
+           "refreshed": refreshed, "refresh_reason": reason}
+    with _DAEMON_CHECK_LOCK:
+        _DAEMON_CHECK.update(out)
+    return out
+
+
+def _daemon_check(force=False) -> dict:
+    """读取体检缓存；过期则**异步**触发重算，绝不阻塞调用方。"""
+    with _DAEMON_CHECK_LOCK:
+        cur = dict(_DAEMON_CHECK)
+        expired = time.time() - cur.get("t", 0.0) > _DAEMON_CHECK_TTL
+        busy = _DAEMON_CHECK_BUSY[0]
+    if (force or expired) and not busy:
+        _DAEMON_CHECK_BUSY[0] = True
+
+        def _bg():
+            try:
+                _run_daemon_check()
+            finally:
+                _DAEMON_CHECK_BUSY[0] = False
+
+        threading.Thread(target=_bg, daemon=True).start()
+    return cur
+
+
+def _start_daemon_check_once() -> None:
+    """服务启动时做一次守护体检（延迟几秒，避开界面首屏的抖动）。"""
+
+    def _bg():
+        time.sleep(3)
+        # 上次升级留下的 .old.exe 此刻已不被占用，顺手清掉
+        try:
+            cn.cleanup_upgrade_backup()
+        except Exception as e:  # noqa: BLE001
+            cn.log.debug("清理升级备份失败: %r", e)
+        _run_daemon_check()
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def _task_daemon_refresh() -> str:
+    """手动"重启守护以应用更新"：强制体检 + 必要时重启，返回可读结论。"""
+    before = cn.daemon_info()[1]
+    out = _run_daemon_check(force_refresh=True)
+    if out.get("refreshed"):
+        cn.notify_system("校园网无感认证",
+                         "后台守护已重启，新版本已生效")
+        return "后台守护已重启为 v%s（原 v%s），新版本功能已生效。" % (
+            cn.APP_VERSION, before or "未知")
+    if out.get("stale"):
+        return "守护仍是旧版本（%s），且无法自动重启：%s\n请到「组件管理」检查值守组件。" % (
+            out.get("version") or "未知", out.get("reason") or "")
+    return "后台守护已是当前版本 v%s，无需处理。" % cn.APP_VERSION
+
+
+def _task_upgrade_apply() -> str:
+    """就地升级：把更高版本的 exe 换到当前程序位置并重启守护。"""
+    ok, msg = cn.apply_upgrade()
+    if ok:
+        cn.notify_system("校园网无感认证", msg)
+    return msg
+
 
 
 def _tail_log(n: int = _LOG_TAIL) -> str:
@@ -389,6 +496,14 @@ class Handler(BaseHTTPRequestHandler):
                 ok, msg = cn.uninstall_component((data or {}).get("name", ""))
                 self._json({"ok": ok, "message": msg,
                             "components": cn.components_status()})
+            elif path == "/api/daemon/refresh":
+                # 守护版本自愈：旧版本守护立刻重启，让新功能生效。
+                # 走后台任务：体检要访问控制通道，可能等 1~3s。
+                self._json({"id": _start_task(_task_daemon_refresh)})
+            elif path == "/api/upgrade/apply":
+                # 就地升级：解决"守护运行时 exe 被锁（WinError 32）导致
+                # 用户无法替换文件"的问题。走后台任务（要停启守护）。
+                self._json({"id": _start_task(_task_upgrade_apply)})
             elif path == "/api/self-test":
                 self._json({"id": _start_task(_task_self_test)})
             elif path == "/api/notify-test":
@@ -543,6 +658,9 @@ def serve(port: int = 0, host: str = "127.0.0.1"):
     _AUTH_TOKEN = uuid.uuid4().hex
     srv = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # 界面一起来就体检后台守护：若守护还是升级前的旧版本，自动重启使其生效
+    # （用户只会"换 exe"，不会知道要去重启/重装组件）。延迟几秒避开首屏。
+    _start_daemon_check_once()
     return srv, "http://127.0.0.1:%d/?token=%s" % (port, _AUTH_TOKEN)
 
 
@@ -760,6 +878,10 @@ input{font-family:inherit;font-size:inherit}
 .warn-bar.err{
   background:#fff0f0;border-color:rgba(255,59,48,.4);color:#a33;
 }
+/* 提示型（蓝）：守护版本自愈等"已自动处理"的状态，不需要用户救火 */
+.warn-bar.info{
+  background:var(--primary-50);border-color:rgba(0,122,255,.32);color:#0b4a8f;
+}
 /* 最近状态事件条：掉线/重连/恢复/登录结果即时展示 */
 .evt-bar{
   display:flex;flex-direction:column;gap:4px;
@@ -969,9 +1091,27 @@ input{font-family:inherit;font-size:inherit}
             <span id="daemonState">○ 已停止</span>
           </div>
           <div class="hint" id="daemonCompHint" style="margin-top:6px"></div>
+          <div class="hint" style="margin-top:4px">
+            升级提示：守护运行时程序文件被系统锁定，手动替换会失败——
+            把新版本文件放进本目录后用上方「立即升级」即可（会自动停守护并换文件）
+          </div>
           <div class="warn-bar" id="daemonWarn" style="display:none;margin-top:10px">
             <span>开机自启已启用，但守护未在运行</span>
             <button class="btn btn-primary" id="btnDStart2" style="flex-shrink:0;margin-left:auto">立即启动</button>
+          </div>
+          <!-- 守护版本陈旧：换 exe 后老守护仍在跑旧代码，新功能不会生效 -->
+          <div class="warn-bar info" id="daemonStaleWarn"
+               style="display:none;margin-top:10px">
+            <span id="daemonStaleText"></span>
+            <button class="btn btn-primary" id="btnDRefresh"
+                    style="flex-shrink:0;margin-left:auto">重启守护以生效</button>
+          </div>
+          <!-- 程序目录里发现了更高版本的 exe -->
+          <div class="warn-bar" id="upgradeWarn"
+               style="display:none;margin-top:10px">
+            <span id="upgradeText"></span>
+            <button class="btn btn-primary" id="btnUpgrade"
+                    style="flex-shrink:0;margin-left:auto">立即升级</button>
           </div>
           <div class="warn-bar err" id="loginErrWarn" style="display:none;margin-top:10px"></div>
           <div class="warn-bar err" id="autostartWarn" style="display:none;margin-top:10px"></div>
@@ -1125,6 +1265,12 @@ const fmtClock = (ts) => {
 };
 
 let toastTimer = null;
+// 最近一次 /api/status 的原始结果：按钮回调（如升级确认框）要用到其中的
+// 候选版本信息，而 load() 里是局部变量，故额外存一份。
+let lastSt = {};
+// HTML 转义（事件/路径等外部文本进 innerHTML 前一律过一道）
+const esc = (s) => String(s == null ? '' : s).replace(/[<>&"']/g,
+  c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
 // 门户认证异常自愈事件的"已提醒"时间戳：同一条事件只弹一次界面气泡，
 // 避免守护持续探测期间重复弹窗
 let lastFixToastT = 0;
@@ -1238,6 +1384,7 @@ async function load(){
   let st;
   try { st = await api('/api/status'); }
   catch(e){ $('#stateText').textContent = '服务未响应'; return; }
+  lastSt = st;
 
   const online = st.online;
   const dot = $('#dot');
@@ -1263,8 +1410,14 @@ async function load(){
   stD.className = 'stat-value ' + (st.daemon ? 'ok' : '');
   const ds = $('#daemonState');
   ds.textContent = st.daemon
-    ? ('● 运行中 (PID ' + st.daemon_pid + ')') : '○ 已停止';
+    ? ('● 运行中 (PID ' + st.daemon_pid + ')'
+       + (st.daemon_version ? ' · v' + st.daemon_version : ''))
+    : '○ 已停止';
   ds.className = st.daemon ? 'ds run' : 'ds stop';
+  // 守护版本与程序版本不一致时，行内也标一下（配合上方蓝色提示条）
+  if (st.daemon && st.daemon_version && st.daemon_version !== st.app_version){
+    ds.textContent += ' ← 旧版';
+  }
 
   swAutoVal = !!st.autostart;
   $('#swAuto').classList.toggle('on', swAutoVal);
@@ -1313,6 +1466,27 @@ async function load(){
   } else {
     awEl.style.display = 'none';
   }
+  // 守护版本陈旧：换 exe 后老守护仍跑旧代码（新功能不生效）。界面启动时
+  // 已尝试自动重启，这里兜底展示 + 提供一键"重启守护以生效"。
+  const dsEl = $('#daemonStaleWarn');
+  if (st.daemon && st.daemon_stale) {
+    $('#daemonStaleText').textContent = '后台守护仍是旧版本'
+      + (st.daemon_version ? ' v' + st.daemon_version : '')
+      + '（当前 v' + (st.app_version || '') + '），新功能尚未生效';
+    dsEl.style.display = 'flex';
+  } else {
+    dsEl.style.display = 'none';
+  }
+  // 程序目录里发现了更高版本的 exe（用户把下载的文件放进来即可，不必手动替换
+  // ——守护在跑时 exe 被系统锁住，手动替换会失败）
+  const upEl = $('#upgradeWarn');
+  if (st.upgrade && st.upgrade.version) {
+    $('#upgradeText').textContent = '发现新版本 v' + st.upgrade.version
+      + '（' + (st.upgrade.name || '') + '），可立即升级';
+    upEl.style.display = 'flex';
+  } else {
+    upEl.style.display = 'none';
+  }
   // 守护最近一次致命登录失败（last_error，成功后自动清除）
   const leEl = $('#loginErrWarn');
   if (st.last_error && st.last_error.msg) {
@@ -1328,8 +1502,8 @@ async function load(){
   if (evts.length){
     const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
                      login_ok:'ok', login_fail:'err', kickout:'warn',
-                     portal_fix:'warn'};
-    const EVT_MARK = {err:'✕', portal_fix:'⚠'};
+                     portal_fix:'warn', daemon_refresh:'warn', upgrade:'ok'};
+    const EVT_MARK = {err:'✕', portal_fix:'⚠', daemon_refresh:'↻', upgrade:'↑'};
     const items = evts.slice(-3).reverse().map(ev => {
       const d = new Date(ev.t * 1000);
       const ts = String(d.getHours()).padStart(2,'0') + ':' +
@@ -1461,6 +1635,24 @@ $('#btnNotifyTest').onclick = async () => {
     : '③ 守护通知 ✗（' + (r.daemon_msg || '未知原因') + '）';
   toast('通知测试：② 界面通知 ' + (r.ui_ok ? '✓' : '✗') + '　' + d
         + '　请查看屏幕右下角', 7000);
+};
+// 守护版本自愈：把仍在跑旧代码的后台守护重启掉，让新功能立刻生效。
+// 界面启动时已自动尝试过一次，这里是手动兜底入口。
+$('#btnDRefresh').onclick = () =>
+  withTask('/api/daemon/refresh', $('#btnDRefresh'), '重启中…', '守护更新');
+// 就地升级：守护在跑时 exe 被系统锁住（覆写报 WinError 32），用户手动替换
+// 会失败。这里由程序自己"停守护 → 旧文件让位 → 新文件就位 → 拉起新守护"。
+$('#btnUpgrade').onclick = () => {
+  const up = lastSt.upgrade || {};
+  confirmDialog({
+    title: '升级到 v' + (up.version || ''),
+    html: '将把程序目录里的 <b>' + esc(up.name || '')
+        + '</b> 替换为当前程序，并<b>重启后台守护</b>。<br><br>'
+        + '升级完成后需要<b>关闭并重新打开本界面</b>，新版本才会完全生效。'
+        + '旧版本会保留为备份，下次启动自动清理。确定继续？',
+    okText: '立即升级',
+    onOk: () => withTask('/api/upgrade/apply', $('#btnUpgrade'), '升级中…', '就地升级')
+  });
 };
 $('#btnSelfTest').onclick = () => withTask('/api/self-test', $('#btnSelfTest'), '自检中…', '自检');
 $('#btnHealth').onclick = () => {

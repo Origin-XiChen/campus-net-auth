@@ -125,7 +125,7 @@ def _cleanup_stale_mei(max_age: float = 3600.0) -> int:
 _MEI_CLEANED = _cleanup_stale_mei()
 
 # 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1317,6 +1317,354 @@ def notify_daemon_test(timeout=3.0):
             pass
 
 
+# ================= 守护版本握手 / 陈旧检测 / 就地升级 =================
+# 为什么需要这套机制：守护不是独立程序，而是"同一个 exe + daemon 参数"。
+# 用户升级时只换 exe 文件，**已经在跑的守护进程**仍然是旧版本的代码镜像，
+# 新功能（残留会话自愈、系统通知等）不会生效——而用户不会知道要去手动
+# 重启/卸载重装组件。
+#
+# 更硬的一层：Windows 下**运行中的 exe 文件是锁定的**（实测覆写报
+# WinError 32），用户连"把新 exe 拖进文件夹"这一步都会失败。但实测
+# **重命名是允许的**，所以本模块的升级助手用「旧 exe 改名让位 → 新 exe
+# 就位」的两步换位来绕开锁。
+
+VER_ACK_TIMEOUT = 3.0
+# 自动重启守护的冷却时间（秒）：防止"判定持续失败 → 反复重启"的循环
+STALE_REFRESH_COOLDOWN = 60.0
+_STALE_REFRESH = {"last": 0.0}
+UPGRADE_BACKUP_SUFFIX = ".old.exe"
+
+
+def self_exe_path():
+    """当前进程对应的 exe 绝对路径（normcase 以便跨大小写比较）。
+
+    打包态 = 自身；开发态 = BASE_DIR 下的 CampusNetAuth.exe。
+    用于判断"正在跑的守护是不是同一个文件"——用户可能同时存在多份部署。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.normcase(os.path.abspath(sys.executable))
+    return os.path.normcase(os.path.join(BASE_DIR, APP_NAME + ".exe"))
+
+
+def _ver_key(text):
+    """把 "0.4.0" 归一成可比较的元组；无法解析返回 ()。"""
+    try:
+        parts = [int(x) for x in str(text).strip().split(".")]
+    except (TypeError, ValueError):
+        return ()
+    return tuple(parts[:4])
+
+
+def _parse_ver_ack(text):
+    """解析守护回执 "OK <version>\\t<exe_path>" → (version, path)。"""
+    t = (text or "").strip()
+    if not t.upper().startswith("OK"):
+        return None, None
+    body = t[2:].strip()
+    ver, _sep, path = body.partition("\t")
+    ver = ver.strip()
+    if not ver:
+        return None, None
+    return ver, path.strip()
+
+
+def daemon_info(timeout=VER_ACK_TIMEOUT):
+    """向运行中的守护查询版本与自身路径（控制通道 VER 指令）。
+
+    返回 (ok, version, exe_path, detail)：
+      * ok=True  → 回执正常，version / exe_path 有效；
+      * ok=False → 无回执或无法解析。⚠️ 无回执的**主因是旧版守护**——
+        早于 0.5.0 的守护根本不认识 VER 指令，会把连接当噪声吞掉；
+        次因是守护正忙于一轮探测，尚未回到 _wait()。调用方需结合
+        state.json 的 daemon_version 兜底，别只看这里。
+    """
+    try:
+        s = socket.create_connection(("127.0.0.1", SINGLETON_PORT),
+                                     timeout=timeout)
+    except OSError as e:
+        return False, None, None, "守护未运行（%s）" % e.__class__.__name__
+    try:
+        s.sendall(b"VER")
+        try:
+            raw = s.recv(1024).decode("utf-8", "replace")
+        except OSError:
+            return False, None, None, "无回执（旧版守护，或正忙于探测）"
+        if not raw.strip():
+            # 旧守护收到不认识的指令会直接关连接 → recv 立刻拿到 EOF。
+            # 这是"守护比 0.5.0 还旧"的确定性信号，措辞要能让人看懂。
+            return False, None, None, "无回执（旧版守护，不认识 VER 指令）"
+        ver, path = _parse_ver_ack(raw)
+        if not ver:
+            return False, None, None, "回执无法解析：%r" % raw[:64]
+        return True, ver, path, ""
+    except OSError as e:
+        return False, None, None, "指令发送失败：%s" % e.__class__.__name__
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def daemon_stale():
+    """判断运行中的守护是否"旧版本 / 别处的程序"。
+
+    返回 (stale, version, reason)。stale=False 且 version=None 表示守护没在跑。
+    判定优先级：
+      1) 控制通道 VER 实时回执（权威）；
+      2) 无回执时回退 state.json 的 daemon_version（守护启动时落盘）。
+         旧版守护不会写这个字段 → 天然被判定为陈旧，正是想要的结果。
+    """
+    if not daemon_running():
+        return False, None, "守护未运行"
+    ok, ver, path, detail = daemon_info()
+    if ok:
+        if ver != APP_VERSION:
+            return True, ver, "守护版本 %s ≠ 当前 %s" % (ver, APP_VERSION)
+        if path and path != self_exe_path():
+            return True, ver, "守护运行的是另一份程序：%s" % path
+        return False, ver, ""
+    recorded = load_state().get("daemon_version")
+    if recorded and recorded == APP_VERSION:
+        # 守护没回话但落盘记录显示它就是当前版本 → 判为"正忙"，不动它
+        return False, recorded, ""
+    return True, recorded, detail or "守护未报告版本（早于 0.5.0）"
+
+
+def ensure_daemon_fresh(force=False):
+    """守护在跑旧版本时自动重启，让新版本立即生效。
+
+    返回 (restarted, reason)。带冷却，避免反复重启。
+    适用于：用户用"改名让位"的方式换了 exe（旧守护仍活着），
+    或同时存在多份部署、端口被另一份的守护占着。
+    """
+    stale, ver, reason = daemon_stale()
+    if not stale:
+        return False, ""
+    if not daemon_component_installed():
+        # ⚠️ 能停不能起 = 把用户的守护直接搞没，绝不能做。
+        # 值守组件（vbs 启动器）缺失时只报告、不动手，交给界面提示安装。
+        log.warning("检测到守护版本陈旧（%s），但值守组件缺失无法自动重启，"
+                    "请在界面「组件管理」安装值守组件", reason)
+        return False, reason
+    now = time.time()
+    if not force and now - _STALE_REFRESH["last"] < STALE_REFRESH_COOLDOWN:
+        return False, "冷却中（%s）" % reason
+    _STALE_REFRESH["last"] = now
+    log.warning("后台守护不是当前版本（%s），自动重启使其生效…", reason)
+    if not stop_daemon():
+        log.warning("停止旧守护未完全成功，仍继续尝试启动")
+    if not start_daemon():
+        log.error("守护重启失败（值守组件未安装或启动异常）")
+        return False, reason
+    record_event("daemon_refresh",
+                 "后台守护已自动重启（%s → %s）" % (ver or "旧版", APP_VERSION))
+    log.info("守护已重启为新版本 %s", APP_VERSION)
+    return True, reason
+
+
+# ---- 就地升级（解决"守护运行时 exe 被锁无法替换"）----
+
+class _VS_FIXEDFILEINFO(ctypes.Structure):
+    _fields_ = [("dwSignature", wintypes.DWORD),
+                ("dwStrucVersion", wintypes.DWORD),
+                ("dwFileVersionMS", wintypes.DWORD),
+                ("dwFileVersionLS", wintypes.DWORD),
+                ("dwProductVersionMS", wintypes.DWORD),
+                ("dwProductVersionLS", wintypes.DWORD),
+                ("dwFileFlagsMask", wintypes.DWORD),
+                ("dwFileFlags", wintypes.DWORD),
+                ("dwFileOS", wintypes.DWORD),
+                ("dwFileType", wintypes.DWORD),
+                ("dwFileSubtype", wintypes.DWORD),
+                ("dwFileDateMS", wintypes.DWORD),
+                ("dwFileDateLS", wintypes.DWORD)]
+
+
+def pe_version(path):
+    """静态读取 PE 文件的版本资源，返回 (version, product)。
+
+    ⚠️ 刻意**不执行**候选文件：执行来路不明的 exe 只为了问一句版本号，
+    风险与收益完全不成比例。这里用 Win32 版本 API 直接读资源，零执行。
+    读不到（非 PE / 无版本资源）返回 (None, None)。
+
+    版本号归一为 3 段（我们只写 x.y.z，资源里是 x.y.z.0）。
+    """
+    if not os.path.exists(path):
+        return None, None
+    try:
+        ver_dll = ctypes.WinDLL("version")
+        ver_dll.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        ver_dll.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR,
+                                                    ctypes.c_void_p]
+        size = ver_dll.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return None, None
+        buf = ctypes.create_string_buffer(size)
+        if not ver_dll.GetFileVersionInfoW(path, 0, size, buf):
+            return None, None
+
+        def _query(sub):
+            ptr = ctypes.c_void_p()
+            ln = wintypes.UINT()
+            if ver_dll.VerQueryValueW(buf, sub, ctypes.byref(ptr),
+                                      ctypes.byref(ln)) and ptr.value:
+                return ptr, ln.value
+            return None, 0
+
+        ver_out = None
+        top, ln = _query("\\")
+        if top and ln >= ctypes.sizeof(_VS_FIXEDFILEINFO):
+            ffi = ctypes.cast(top, ctypes.POINTER(_VS_FIXEDFILEINFO)).contents
+            ver_out = "%d.%d.%d" % (ffi.dwFileVersionMS >> 16,
+                                    ffi.dwFileVersionMS & 0xFFFF,
+                                    ffi.dwFileVersionLS >> 16)
+
+        product = None
+        tv, tln = _query("\\VarFileInfo\\Translation")
+        if tv and tln >= 4:
+            lang, cp = ctypes.cast(
+                tv, ctypes.POINTER(ctypes.c_ushort * 2)).contents
+            sub = "\\StringFileInfo\\%04x%04x\\ProductName" % (lang, cp)
+            pv, pln = _query(sub)
+            if pv:
+                product = ctypes.wstring_at(pv, pln).strip().rstrip("\x00")
+        return ver_out, product
+    except Exception as e:  # noqa: BLE001
+        log.debug("读取版本资源失败（%s）: %r", os.path.basename(path), e)
+        return None, None
+
+
+def upgrade_backup_path():
+    """就地升级时旧版本让位后的路径（下一次启动自动清理）。"""
+    exe = daemon_exe() if getattr(sys, "frozen", False) else \
+        os.path.join(BASE_DIR, APP_NAME + ".exe")
+    return exe + UPGRADE_BACKUP_SUFFIX
+
+
+def cleanup_upgrade_backup():
+    """删除上次升级留下的 .old.exe（此时旧进程早已退出，文件不再被占用）。"""
+    p = upgrade_backup_path()
+    if not os.path.exists(p):
+        return False
+    try:
+        os.remove(p)
+        log.info("已清理上次升级的旧版本备份：%s", os.path.basename(p))
+        return True
+    except OSError:
+        # 旧界面进程可能还映射着它，下次启动再试即可，不值得报错
+        log.debug("暂无法清理 %s（可能仍被占用）", os.path.basename(p))
+        return False
+
+
+def find_upgrade_candidate():
+    """在程序目录里找"版本比当前更高"的 CampusNetAuth exe。
+
+    覆盖用户最常见的两种落地方式：
+      * 从 GitHub 直接下载 → 与现有 exe 同名，Windows 自动存成
+        `CampusNetAuth (1).exe`（拖进同一目录时）；
+      * 自己改名成 `CampusNetAuth.new.exe` 再放进来。
+
+    排除自身、升级备份 `*.old.exe`，并要求版本严格高于当前。
+    返回 (path, version)；没有候选返回 (None, None)。
+    """
+    if not getattr(sys, "frozen", False):
+        return None, None      # 开发态不做自我替换
+    cur = self_exe_path()
+    cur_key = _ver_key(APP_VERSION)
+    best = (None, None, ())
+    try:
+        names = os.listdir(BASE_DIR)
+    except OSError:
+        return None, None
+    for name in names:
+        low = name.lower()
+        if not low.endswith(".exe"):
+            continue
+        if not low.startswith(APP_NAME.lower()):
+            continue
+        if low.endswith(UPGRADE_BACKUP_SUFFIX.lower()):
+            continue
+        p = os.path.join(BASE_DIR, name)
+        if os.path.normcase(os.path.abspath(p)) == cur:
+            continue
+        ver, product = pe_version(p)
+        if not ver:
+            continue
+        # 双重校验：版本资源必须自报是 CampusNetAuth，避免误吞同名软件
+        if product and product != APP_NAME:
+            continue
+        key = _ver_key(ver)
+        if len(key) < 3 or key <= cur_key:
+            continue
+        if key > best[2]:
+            best = (p, ver, key)
+    return best[0], best[1]
+
+
+def apply_upgrade(new_path=None):
+    """把更高版本的 exe 就地替换到 CampusNetAuth.exe 并重启守护。
+
+    返回 (ok, message)。步骤刻意保守：
+      1. 校验候选（版本资源必须更高，且自报 CampusNetAuth）；
+      2. 停守护 —— 运行中的 exe 被锁（WinError 32），不停就换不了；
+      3. 现 exe 改名 `.old.exe` 让位（重命名在运行中是允许的，实测）；
+      4. 新 exe 就位；
+      5. 原本在跑守护的话，用新版本重新拉起。
+    旧版本保留为 `.old.exe`，下次启动 `cleanup_upgrade_backup()` 自动删。
+    界面进程自己仍映射着旧镜像，故需用户关闭并重新打开界面。
+    """
+    if not getattr(sys, "frozen", False):
+        return False, "开发态不支持就地升级（请直接重新构建）"
+    target = self_exe_path()
+    if not new_path:
+        new_path, ver = find_upgrade_candidate()
+        if not new_path:
+            return False, "程序目录里没有找到更高版本的程序文件"
+    else:
+        ver, product = pe_version(new_path)
+        if not ver:
+            return False, "无法读取该文件的版本信息，可能不是有效的程序文件"
+        if product and product != APP_NAME:
+            return False, "该文件的 ProductName 是 %r，不是 %s" % (product,
+                                                                 APP_NAME)
+        if _ver_key(ver) <= _ver_key(APP_VERSION):
+            return False, "该文件版本 %s 不高于当前 %s" % (ver, APP_VERSION)
+    if not os.path.exists(new_path):
+        return False, "升级文件不存在：%s" % new_path
+
+    was_running = daemon_running()
+    backup = upgrade_backup_path()
+    log.info("开始就地升级：%s → %s（当前 %s）", APP_VERSION, ver, target)
+    if was_running and not stop_daemon():
+        return False, "无法停止后台守护，升级已中止（可手动停止后重试）"
+    # 上一次的备份若还在（通常已被启动清理），先腾位
+    try:
+        if os.path.exists(backup):
+            os.remove(backup)
+    except OSError:
+        pass
+    try:
+        os.replace(target, backup)          # 旧 exe 让位（运行中也允许）
+        os.replace(new_path, target)        # 新 exe 就位
+    except OSError as e:
+        # 尽力回滚，别把用户撂在"没有 exe"的状态
+        try:
+            if not os.path.exists(target) and os.path.exists(backup):
+                os.replace(backup, target)
+        except OSError:
+            pass
+        log.error("就地升级失败：%r", e)
+        return False, "替换文件失败：%s（可能仍被占用）" % e
+    log.info("升级文件已就位，旧版本备份为 %s", os.path.basename(backup))
+    if was_running and not start_daemon():
+        return True, ("程序已升级到 %s，但后台守护未能自动启动，"
+                      "请在界面里手动启动" % ver)
+    record_event("upgrade", "程序已升级 %s → %s" % (APP_VERSION, ver))
+    return True, ("已升级到 %s。请关闭并重新打开管理界面，"
+                  "新版本才会完全生效" % ver)
+
+
 def acquire_singleton():
     """防止守护进程重复启动"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1676,6 +2024,14 @@ def run_daemon(cfg, cred):
     # 断网重连、WiFi 切换、回到校园网等场景从 30s 轮询延迟降到秒级。
     _start_addr_change_watcher()
 
+    # 版本落盘：控制通道 VER 是实时权威判据，但守护可能正忙于一轮探测而
+    # 未能及时回执。此时界面回退读取这份记录来判断"守护是不是当前版本"——
+    # 旧版守护不会写这个字段，于是天然被判为陈旧并触发自动重启（升级自愈）。
+    update_state({"daemon_version": APP_VERSION,
+                  "daemon_exe": self_exe_path(),
+                  "daemon_started": time.strftime("%Y-%m-%d %H:%M:%S")},
+                 drop=())
+
     def _hb():
         """在线静默期的心跳日志，证明守护存活（不刷屏）"""
         nonlocal last_heartbeat
@@ -1702,6 +2058,8 @@ def run_daemon(cfg, cred):
 
         NOTIFY 也不打断等待（只借这条通道让"守护进程自己"发一条通知，
         用于验证无人值守时的通知通道），处理完继续等剩余时间。
+        VER 同理：只回一句"我是谁 + 我是哪个版本"，用于判定守护是否需要
+        因升级而自动重启，同样不打断等待。
         """
         deadline = time.time() + max(0.0, float(sec))
         while True:
@@ -1715,7 +2073,16 @@ def run_daemon(cfg, cred):
                 _conn, _ = lock.accept()
                 try:
                     _data = _conn.recv(16).decode("utf-8", "replace").strip().upper()
-                    if _data == "NOTIFY":
+                    if _data == "VER":
+                        # 版本握手：让界面/CLI 判断"正在跑的守护是不是当前版本"。
+                        # 不认识该指令的旧守护会把它当噪声吞掉，调用方据"无回执"
+                        # 判定为陈旧，进而自动重启——这正是升级自愈的入口。
+                        try:
+                            _conn.sendall(("OK %s\t%s\n" % (
+                                APP_VERSION, self_exe_path())).encode("utf-8"))
+                        except OSError:
+                            pass
+                    elif _data == "NOTIFY":
                         # 通知测试：由守护进程自己发出（模拟"界面不在"的
                         # 无人值守场景），验证托盘通知通道是否被系统放行
                         log.info("收到通知测试指令，守护发送测试通知")
@@ -2549,6 +2916,14 @@ def cmd_status(args):
     print("开机自启 : %s" % ("已启用" if autostart_status() else "未启用"))
     print("守护进程 : %s" % (
         "运行中(PID=%s)" % daemon_pid() if daemon_running() else "已停止"))
+    if daemon_running():
+        # 守护版本：换 exe 后老守护仍跑旧代码，这里一眼能看出来
+        _ok, _dv, _dp, _dd = daemon_info()
+        if _ok:
+            _mark = "" if _dv == APP_VERSION else "  ← 旧版本，建议执行 upgrade"
+            print("守护版本 : v%s%s" % (_dv, _mark))
+        else:
+            print("守护版本 : 未知（%s）" % _dd)
     print("凭据文件 : %s" % ("已存在" if os.path.exists(CRED_PATH) else "缺失"))
     if loc:
         print("登录页   : %s" % loc[:160])
@@ -2562,6 +2937,36 @@ def cmd_status(args):
                     names.append("%s(%s)" % (v.get("serviceShowName", k), k))
             print("可选服务 : %s" % ", ".join(names))
     return 0
+
+
+def cmd_upgrade(args):
+    """守护版本自愈 / 就地升级。
+
+    两种用途：
+      * `upgrade --check`：只体检——守护是不是当前版本、目录里有没有新版本，
+        不改动任何文件；
+      * `upgrade`：把目录里更高版本的 exe 就地换上来并重启守护。
+        之所以需要程序自己动手：守护运行时 exe 被系统锁住（覆写报 WinError 32），
+        用户手动替换会失败；而重命名是允许的，故用"旧文件让位"绕开。
+    """
+    if getattr(args, "check", False):
+        stale, ver, reason = daemon_stale()
+        print("当前版本 : %s" % APP_VERSION)
+        if daemon_running():
+            ok, dv, dp, dd = daemon_info()
+            print("守护进程 : 运行中(PID=%s)" % daemon_pid())
+            print("守护版本 : %s" % ("v%s" % dv if ok else "未知（%s）" % dd))
+            print("版本一致 : %s" % ("是" if not stale else "否 —— %s" % reason))
+        else:
+            print("守护进程 : 已停止")
+        up, up_ver = find_upgrade_candidate()
+        print("升级候选 : %s" % ("%s（v%s）" % (os.path.basename(up), up_ver)
+                                if up else "未发现（把新 exe 放进程序目录即可）"))
+        return 0
+
+    ok, msg = apply_upgrade()
+    print(("✓ " if ok else "✗ ") + msg)
+    return 0 if ok else 1
 
 
 def cmd_log(args):
@@ -2874,6 +3279,11 @@ def main():
                         help="只跑 N 轮就出报告（内部自测用）")
     p_diag.set_defaults(func=cmd_diagnose)
     sub.add_parser("test", help="自检").set_defaults(func=cmd_test)
+    p_up = sub.add_parser("upgrade",
+                          help="就地升级到程序目录里的新版本并重启守护")
+    p_up.add_argument("--check", action="store_true",
+                      help="只体检（守护版本 + 升级候选），不改动任何文件")
+    p_up.set_defaults(func=cmd_upgrade)
     sub.add_parser("ui", help="打开图形管理界面").set_defaults(func=cmd_ui)
     p_login = sub.add_parser("login", help="立即登录")
     p_login.add_argument("--force", action="store_true", help="已在线也强制重登")

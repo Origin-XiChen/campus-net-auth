@@ -176,6 +176,18 @@ class _StateDirMixin(unittest.TestCase):
     def tearDown(self):
         for k, v in self._saved.items():
             setattr(cn, k, v)
+        # 通配清理本用例 PIＤ 命名的所有临时文件：除了 state/config 本体，
+        # 临时换位的 .exe / .new.exe / .old.exe 也在这里兜底（沙箱下
+        # os.remove 可能被 shim 拦截，失败就静默跳过，不影响测试结论）。
+        root = os.path.dirname(self._state_file)
+        base = os.path.basename(self._state_file)[:-len(".json")]
+        for name in os.listdir(root):
+            if not name.startswith(base):
+                continue
+            try:
+                os.remove(os.path.join(root, name))
+            except OSError:
+                pass
         for p in (getattr(self, "_state_file", ""),
                   getattr(self, "_config_file", "")):
             if p:
@@ -521,6 +533,330 @@ class TestNotifyDaemonTest(unittest.TestCase):
             ok, msg = cn.notify_daemon_test()
         self.assertFalse(ok)
         self.assertIn("回执异常", msg)
+
+
+class TestDaemonVersionHandshake(unittest.TestCase):
+    """守护版本握手：换 exe 后仍在跑的旧守护必须能被识别出来。
+
+    背景：守护 = 同一 exe + daemon 参数，用户升级只换文件，已运行的守护
+    仍是旧代码；而且守护运行时 exe 被系统锁住（覆写报 WinError 32）。
+    """
+
+    def test_parse_ver_ack_ok(self):
+        ver, path = cn._parse_ver_ack("OK 0.5.0\tC:\\app\\CampusNetAuth.exe\n")
+        self.assertEqual(ver, "0.5.0")
+        self.assertEqual(path, "C:\\app\\CampusNetAuth.exe")
+
+    def test_parse_ver_ack_tolerates_missing_path(self):
+        ver, path = cn._parse_ver_ack("OK 0.5.0")
+        self.assertEqual(ver, "0.5.0")
+        self.assertEqual(path, "")
+
+    def test_parse_ver_ack_rejects_garbage(self):
+        for bad in ("", "   ", "??", "OK", "OK "):
+            self.assertEqual(cn._parse_ver_ack(bad), (None, None), bad)
+
+    def test_ver_key_orders_numerically(self):
+        # 字符串比较会把 "0.10.0" 排在 "0.9.0" 前面，这里必须是数值序
+        self.assertLess(cn._ver_key("0.9.0"), cn._ver_key("0.10.0"))
+        self.assertGreater(cn._ver_key("1.0"), cn._ver_key("0.99.99"))
+        self.assertEqual(cn._ver_key("bad"), ())
+
+    def test_no_daemon_is_not_stale(self):
+        with mock.patch.object(cn, "daemon_running", return_value=False):
+            stale, ver, reason = cn.daemon_stale()
+        self.assertFalse(stale)
+        self.assertIsNone(ver)
+        self.assertIn("未运行", reason)
+
+    def test_matching_version_is_fresh(self):
+        with mock.patch.object(cn, "daemon_running", return_value=True), \
+             mock.patch.object(cn, "daemon_info",
+                               return_value=(True, cn.APP_VERSION,
+                                             cn.self_exe_path(), "")):
+            stale, ver, reason = cn.daemon_stale()
+        self.assertFalse(stale)
+        self.assertEqual(ver, cn.APP_VERSION)
+        self.assertEqual(reason, "")
+
+    def test_older_version_is_stale(self):
+        with mock.patch.object(cn, "daemon_running", return_value=True), \
+             mock.patch.object(cn, "daemon_info",
+                               return_value=(True, "0.1.0", "", "")):
+            stale, ver, reason = cn.daemon_stale()
+        self.assertTrue(stale)
+        self.assertEqual(ver, "0.1.0")
+        self.assertIn("≠", reason)
+
+    def test_other_path_same_version_is_stale(self):
+        """版本相同但跑的是另一份程序（多份部署并存）也要重启。"""
+        with mock.patch.object(cn, "daemon_running", return_value=True), \
+             mock.patch.object(cn, "daemon_info",
+                               return_value=(True, cn.APP_VERSION,
+                                             "c:\\other\\campusnetauth.exe", "")):
+            stale, ver, reason = cn.daemon_stale()
+        self.assertTrue(stale)
+        self.assertIn("另一份程序", reason)
+
+    def test_silent_daemon_without_state_record_is_stale(self):
+        """旧版守护不认识 VER → 无回执；它也不写 daemon_version → 判陈旧。"""
+        with mock.patch.object(cn, "daemon_running", return_value=True), \
+             mock.patch.object(cn, "daemon_info",
+                               return_value=(False, None, None, "无回执")), \
+             mock.patch.object(cn, "load_state", return_value={}):
+            stale, ver, reason = cn.daemon_stale()
+        self.assertTrue(stale)
+        self.assertIsNone(ver)
+
+    def test_silent_daemon_with_matching_state_record_is_fresh(self):
+        """守护没来得及回话（正忙于探测），但落盘记录显示就是当前版本 → 不动它。"""
+        with mock.patch.object(cn, "daemon_running", return_value=True), \
+             mock.patch.object(cn, "daemon_info",
+                               return_value=(False, None, None, "无回执")), \
+             mock.patch.object(cn, "load_state",
+                               return_value={"daemon_version": cn.APP_VERSION}):
+            stale, ver, _reason = cn.daemon_stale()
+        self.assertFalse(stale)
+        self.assertEqual(ver, cn.APP_VERSION)
+
+    def test_daemon_info_no_daemon(self):
+        with mock.patch.object(cn.socket, "create_connection",
+                               side_effect=ConnectionRefusedError()):
+            ok, ver, path, detail = cn.daemon_info()
+        self.assertFalse(ok)
+        self.assertIsNone(ver)
+        self.assertIn("未运行", detail)
+
+    def test_daemon_info_reads_ack(self):
+        class FakeSock:
+            def sendall(self, b):
+                self.sent = b
+
+            def recv(self, n):
+                return b"OK 0.5.0\tC:\\app\\CampusNetAuth.exe\n"
+
+            def close(self):
+                pass
+
+        with mock.patch.object(cn.socket, "create_connection",
+                               return_value=FakeSock()):
+            ok, ver, path, _ = cn.daemon_info()
+        self.assertTrue(ok)
+        self.assertEqual(ver, "0.5.0")
+        self.assertEqual(path, "C:\\app\\CampusNetAuth.exe")
+
+    def test_daemon_info_empty_reply_means_old_daemon(self):
+        """旧守护收到不认识的 VER 会直接关连接 → recv 拿到 EOF（空串）。"""
+        class FakeSock:
+            def sendall(self, b):
+                pass
+
+            def recv(self, n):
+                return b""
+
+            def close(self):
+                pass
+
+        with mock.patch.object(cn.socket, "create_connection",
+                               return_value=FakeSock()):
+            ok, _ver, _path, detail = cn.daemon_info()
+        self.assertFalse(ok)
+        self.assertIn("旧版守护", detail)
+
+
+class TestDaemonRefreshGuard(unittest.TestCase):
+    """自动重启守护的守卫：只能停不能起时，宁可不做也不能把守护搞没。"""
+
+    def test_nothing_to_do_when_fresh(self):
+        with mock.patch.object(cn, "daemon_stale",
+                               return_value=(False, None, "")):
+            restarted, reason = cn.ensure_daemon_fresh(force=True)
+        self.assertFalse(restarted)
+        self.assertEqual(reason, "")
+
+    def test_refuses_when_component_missing(self):
+        """值守组件缺失 → 停掉就再也起不来，必须拒绝动手。"""
+        with mock.patch.object(cn, "daemon_stale",
+                               return_value=(True, "0.1.0", "版本不符")), \
+             mock.patch.object(cn, "daemon_component_installed",
+                               return_value=False), \
+             mock.patch.object(cn, "stop_daemon") as stop:
+            restarted, reason = cn.ensure_daemon_fresh(force=True)
+        self.assertFalse(restarted)
+        self.assertEqual(reason, "版本不符")
+        stop.assert_not_called()
+
+    def test_restarts_when_stale(self):
+        with mock.patch.object(cn, "daemon_stale",
+                               return_value=(True, "0.1.0", "版本不符")), \
+             mock.patch.object(cn, "daemon_component_installed",
+                               return_value=True), \
+             mock.patch.object(cn, "stop_daemon", return_value=True), \
+             mock.patch.object(cn, "start_daemon", return_value=True), \
+             mock.patch.object(cn, "record_event") as ev:
+            restarted, _reason = cn.ensure_daemon_fresh(force=True)
+        self.assertTrue(restarted)
+        self.assertEqual(ev.call_args[0][0], "daemon_refresh")
+
+    def test_reports_failure_when_start_fails(self):
+        with mock.patch.object(cn, "daemon_stale",
+                               return_value=(True, "0.1.0", "版本不符")), \
+             mock.patch.object(cn, "daemon_component_installed",
+                               return_value=True), \
+             mock.patch.object(cn, "stop_daemon", return_value=True), \
+             mock.patch.object(cn, "start_daemon", return_value=False):
+            restarted, _reason = cn.ensure_daemon_fresh(force=True)
+        self.assertFalse(restarted)
+
+    def test_cooldown_blocks_second_restart(self):
+        cn._STALE_REFRESH["last"] = 0.0
+        with mock.patch.object(cn, "daemon_stale",
+                               return_value=(True, "0.1.0", "版本不符")), \
+             mock.patch.object(cn, "daemon_component_installed",
+                               return_value=True), \
+             mock.patch.object(cn, "stop_daemon", return_value=True), \
+             mock.patch.object(cn, "start_daemon", return_value=True), \
+             mock.patch.object(cn, "record_event"), \
+             mock.patch.object(cn.time, "time", return_value=1000.0):
+            first, _ = cn.ensure_daemon_fresh()
+            second, reason = cn.ensure_daemon_fresh()
+        self.assertTrue(first)
+        self.assertFalse(second)          # 冷却期内不再重复重启
+        self.assertIn("冷却", reason)
+
+
+class TestUpgradeHelper(_StateDirMixin):
+    """就地升级：解决"守护运行时 exe 被锁，用户手动替换会失败"。"""
+
+    def test_dev_mode_has_no_candidate(self):
+        with mock.patch.object(cn.sys, "frozen", False, create=True):
+            self.assertEqual(cn.find_upgrade_candidate(), (None, None))
+
+    def test_dev_mode_refuses_apply(self):
+        with mock.patch.object(cn.sys, "frozen", False, create=True):
+            ok, msg = cn.apply_upgrade()
+        self.assertFalse(ok)
+        self.assertIn("开发态", msg)
+
+    def test_pe_version_missing_file(self):
+        self.assertEqual(cn.pe_version(self._state_file + ".nope"),
+                         (None, None))
+
+    def test_pe_version_non_pe_file(self):
+        """普通文本文件不是 PE，必须安全返回而不是抛异常。"""
+        self.assertEqual(cn.pe_version(cn.__file__), (None, None))
+
+    def test_apply_rejects_lower_version(self):
+        """构造一个"版本不高于当前"的候选文件 → 必须拒绝（不能自我降级）。"""
+        fake = self._state_file + ".exe"
+        with open(fake, "wb") as f:
+            f.write(b"MZ" + b"\x00" * 512)
+        try:
+            with mock.patch.object(cn.sys, "frozen", True, create=True), \
+                 mock.patch.object(cn, "pe_version",
+                                   return_value=("0.0.1", "CampusNetAuth")):
+                ok, msg = cn.apply_upgrade(fake)
+            self.assertFalse(ok)
+            self.assertIn("不高于", msg)
+        finally:
+            if os.path.exists(fake):
+                os.remove(fake)
+
+    def test_apply_rejects_foreign_product(self):
+        fake = self._state_file + ".exe"
+        with open(fake, "wb") as f:
+            f.write(b"MZ" + b"\x00" * 512)
+        try:
+            with mock.patch.object(cn.sys, "frozen", True, create=True), \
+                 mock.patch.object(cn, "pe_version",
+                                   return_value=("9.9.9", "SomeOtherApp")):
+                ok, msg = cn.apply_upgrade(fake)
+            self.assertFalse(ok)
+            self.assertIn("不是 CampusNetAuth", msg)
+        finally:
+            if os.path.exists(fake):
+                os.remove(fake)
+
+    def test_cleanup_backup_noop_when_absent(self):
+        with mock.patch.object(cn, "upgrade_backup_path",
+                               return_value=self._state_file + ".old.exe"):
+            self.assertFalse(cn.cleanup_upgrade_backup())
+
+    def test_apply_swaps_files_and_keeps_backup(self):
+        """核心文件换位：旧 exe → .old.exe 让位，新 exe → 原位置。
+
+        之所以不是直接覆写：守护/界面在跑时 exe 被系统锁定（覆写报
+        WinError 32），而**重命名是允许的**。
+        """
+        cur = self._state_file + ".exe"          # 假装是"当前程序"
+        new = self._state_file + ".new.exe"      # 候选新版本
+        bak = cur + cn.UPGRADE_BACKUP_SUFFIX
+        with open(cur, "wb") as f:
+            f.write(b"OLD-BINARY")
+        with open(new, "wb") as f:
+            f.write(b"NEW-BINARY")
+        try:
+            with mock.patch.object(cn.sys, "frozen", True, create=True), \
+                 mock.patch.object(cn, "self_exe_path", return_value=cur), \
+                 mock.patch.object(cn, "upgrade_backup_path",
+                                   return_value=bak), \
+                 mock.patch.object(cn, "daemon_running", return_value=False), \
+                 mock.patch.object(cn, "pe_version",
+                                   return_value=("9.9.9", "CampusNetAuth")), \
+                 mock.patch.object(cn, "record_event"):
+                ok, msg = cn.apply_upgrade(new)
+            self.assertTrue(ok, msg)
+            self.assertEqual(open(cur, "rb").read(), b"NEW-BINARY")
+            self.assertEqual(open(bak, "rb").read(), b"OLD-BINARY")
+            self.assertFalse(os.path.exists(new))   # 候选已移动，不留副本
+            self.assertIn("9.9.9", msg)
+        finally:
+            for p in (cur, new, bak):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+
+    def test_apply_rolls_back_when_second_move_fails(self):
+        """换位第二步失败时必须把旧文件放回去，不能把用户撂在"没有 exe"。"""
+        cur = self._state_file + ".exe"
+        new = self._state_file + ".new.exe"
+        bak = cur + cn.UPGRADE_BACKUP_SUFFIX
+        with open(cur, "wb") as f:
+            f.write(b"OLD-BINARY")
+        with open(new, "wb") as f:
+            f.write(b"NEW-BINARY")
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky_replace(a, b):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError(32, "in use")
+            return real_replace(a, b)
+
+        try:
+            with mock.patch.object(cn.sys, "frozen", True, create=True), \
+                 mock.patch.object(cn, "self_exe_path", return_value=cur), \
+                 mock.patch.object(cn, "upgrade_backup_path",
+                                   return_value=bak), \
+                 mock.patch.object(cn, "daemon_running", return_value=False), \
+                 mock.patch.object(cn, "pe_version",
+                                   return_value=("9.9.9", "CampusNetAuth")), \
+                 mock.patch.object(cn.os, "replace",
+                                   side_effect=flaky_replace):
+                ok, _msg = cn.apply_upgrade(new)
+            self.assertFalse(ok)
+            self.assertTrue(os.path.exists(cur), "旧文件必须被放回原位")
+            self.assertEqual(open(cur, "rb").read(), b"OLD-BINARY")
+        finally:
+            for p in (cur, new, bak):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":

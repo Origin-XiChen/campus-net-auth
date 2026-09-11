@@ -26,6 +26,7 @@ REPORT = []
 FAILS = []
 BACKUP_RUN = None
 TOKEN = ""  # GUI 服务的会话令牌（启动后从 _ui_trace.log 的 URL 里解析）
+APP_VER = ""  # exe 自报版本（--version），用于核对 status 里的 app_version
 
 
 def rec(msg=""):
@@ -240,6 +241,20 @@ def main():
     if not os.path.exists(src_exe):
         check("dist 交付 exe 存在", False, src_exe)
         return 2
+    # exe 自报版本（顺带验证 CLI --version 可用）。
+    # ⚠️ 打包态 CLI 面向 cmd.exe 输出，编码是**系统 locale（中文 Windows=GBK）**，
+    # 用 text=True 会按 UTF-8 解码抛 UnicodeDecodeError，必须显式解码。
+    global APP_VER
+    try:
+        vr = subprocess.run([src_exe, "--version"], capture_output=True,
+                            timeout=60)
+        APP_VER = (vr.stdout or b"").decode("gbk", "replace").strip()
+        if not APP_VER:
+            APP_VER = (vr.stdout or b"").decode("utf-8", "replace").strip()
+    except Exception as e:
+        rec("  [警告] 读取 exe 版本失败: %r" % e)
+    check("exe --version 可用", APP_VER.startswith("CampusNetAuth"), APP_VER)
+    APP_VER = APP_VER.replace("CampusNetAuth", "").strip()
     VERIFY = os.path.join(tempfile.gettempdir(),
                           "cna_smoke_%d" % int(time.time()))
     os.makedirs(VERIFY, exist_ok=True)
@@ -320,10 +335,36 @@ def main():
     st = http(BASE + "api/status")
     for k in ("online", "autostart", "autostart_health", "daemon",
               "daemon_pid", "components", "first_deploy", "foreign_files",
-              "last_error", "events", "cfg", "host", "interval", "username"):
+              "last_error", "events", "cfg", "host", "interval", "username",
+              # 守护版本体检（升级自愈）：界面据这些字段提示/自动重启陈旧守护
+              "daemon_version", "daemon_stale", "daemon_stale_reason",
+              "upgrade", "app_version"):
         check("status 字段 %s" % k, k in st, "" if k in st else "缺失")
     rec("  [信息] components=%s autostart=%s daemon=%s" %
         (st.get("components"), st.get("autostart"), st.get("daemon")))
+    check("app_version 与 exe 版本一致", st.get("app_version") == APP_VER,
+          "status=%r exe=%r" % (st.get("app_version"), APP_VER))
+    # 没有守护在跑（本目录未安装值守组件）时不应误报"守护陈旧"
+    check("无守护时 daemon_stale 为假", st.get("daemon_stale") is False,
+          "stale=%r reason=%r" % (st.get("daemon_stale"),
+                                  st.get("daemon_stale_reason")))
+
+    # 升级自愈的两个端点：都必须回后台任务 id（耗时操作不当场阻塞请求）
+    for _p, _label in (("/api/daemon/refresh", "守护更新"),
+                       ("/api/upgrade/apply", "就地升级")):
+        _r = http(BASE + _p.lstrip("/"), method="POST")
+        check("%s 端点返回任务 id" % _label,
+              isinstance(_r, dict) and bool(_r.get("id")), repr(_r)[:80])
+        tid = _r.get("id")
+        if tid:
+            time.sleep(2)
+            _t = http(BASE + "api/task?id=" + tid)
+            check("%s 任务可轮询" % _label,
+                  isinstance(_t, dict) and _t.get("status") in
+                  ("running", "done", "error"), repr(_t)[:80])
+    # 就地升级在"没有更高版本候选"的目录里必须安全拒绝，绝不能动文件
+    check("无候选时 exe 未被替换",
+          os.path.exists(os.path.join(VERIFY, "CampusNetAuth.exe")))
 
     lg = http(BASE + "api/log?n=20")
     _txt = lg.get("text", "") if isinstance(lg, dict) else ""
