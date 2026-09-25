@@ -125,7 +125,7 @@ def _cleanup_stale_mei(max_age: float = 3600.0) -> int:
 _MEI_CLEANED = _cleanup_stale_mei()
 
 # 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -2637,14 +2637,18 @@ def _autostart_cmd():
     """注册表 Run 键里存放的启动命令。
 
     * 打包态：优先 wscript 静默运行同目录的 CampusNetAuthDaemon.vbs
-      （窗口样式 0 = 完全无窗口，登录时不闪任何黑窗）；
+      （窗口样式 0 = 完全无窗口，登录时不闪任何黑窗）。`//B`（batch 模式）
+      必不可少：目录被"绿色删除/搬走"后 Run 键会指向不存在的 vbs，不带 //B
+      的 wscript 会弹出模态"找不到脚本文件"报错框并卡住登录（实测如此），
+      带 //B 则静默退出（exit 1，零 UI）——vbs 内部本就是 On Error Resume Next
+      的容错启动器，静默失败符合设计。
       vbs 缺失（被手动删除）时退化为直接运行 exe（仍会被 hide_console 隐藏）。
     * 开发态：pythonw 命名副本 + 脚本参数（保持原有逻辑）。
     """
     if getattr(sys, "frozen", False):
         vbs = os.path.join(BASE_DIR, DAEMON_VBS_NAME)
         if os.path.exists(vbs):
-            return 'wscript.exe "%s"' % vbs
+            return 'wscript.exe //B "%s"' % vbs
         return '"%s" daemon' % os.path.abspath(sys.executable)
     script = os.path.abspath(__file__)
     return '"%s" "%s" daemon' % (daemon_exe(), script)
@@ -2768,6 +2772,48 @@ def autostart_health():
     if not os.path.exists(ref):
         return False, "开机自启指向的程序已丢失：" + ref
     return True, ""
+
+
+def repair_autostart_cmd():
+    """自愈 Run 键命令：程序目录被搬走/改名后把自启重新指到当前位置。
+
+    只在两种情况下重写，其余一律不动作：
+    * Run 键指向的文件已不存在（目录被移动或删除）；
+    * Run 键指向的就是当前目录，但命令是旧格式（缺 //B）→ 原地升级。
+    指向"另一份仍然存在的安装"时不动手：测试副本 / 多副本实例不得劫持
+    用户真实安装的自启。仅打包态生效（开发态的 pythonw 路径不在此列）。
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    want = _autostart_cmd()
+    if DAEMON_VBS_NAME not in want:
+        # 当前目录没有启动器（残缺安装）：交给 autostart_health 的红色
+        # 警示条引导用户，不在这里擅自改写
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_QUERY_VALUE) as k:
+            try:
+                value, _ = winreg.QueryValueEx(k, TASK_NAME)
+            except FileNotFoundError:
+                return False  # 未启用自启
+        cur = (value or "").strip()
+        if not cur or cur == want:
+            return False
+        m = re.search(r'"([^"]+)"', cur) or re.match(r"(\S+)", cur)
+        ref = os.path.abspath(m.group(1).strip()) if m else ""
+        same_dir = os.path.dirname(ref).lower() == os.path.abspath(BASE_DIR).lower()
+        if ref and os.path.exists(ref) and not same_dir:
+            return False  # 另一份仍然存在的安装，不动
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, TASK_NAME, 0, winreg.REG_SZ, want)
+        log.info("开机自启命令已自动修正: %r -> %s", cur, want)
+        return True
+    except Exception as e:
+        log.debug("自启命令自愈跳过: %r", e)
+        return False
 
 
 # ============================ 子命令 ============================
@@ -3106,6 +3152,7 @@ def cmd_ui(args):
         pass
     force_utf8_console()
     hide_console()  # 双击 exe 时消除黑窗；从 cmd 前台运行时不动父控制台
+    repair_autostart_cmd()  # 目录被搬走/改名后自愈自启指向（静默，失败无感）
     # ---- HTML UI（pywebview）优先 ----
     # 注意：desktop.main() 阻塞直到窗口关闭；仅当 pywebview 缺失或
     # WebView2 初始化失败时才快速返回/抛异常 → 回退 tkinter。

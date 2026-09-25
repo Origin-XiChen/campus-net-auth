@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -857,6 +858,150 @@ class TestUpgradeHelper(_StateDirMixin):
                         os.remove(p)
                 except OSError:
                     pass
+
+
+class _FakeRegKey:
+    def __init__(self, store):
+        self.store = store
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeWinreg(types.ModuleType):
+    """内存版 winreg：单测绝不触碰真实注册表。"""
+
+    HKEY_CURRENT_USER = 0
+    KEY_QUERY_VALUE = 1
+    KEY_SET_VALUE = 2
+    REG_SZ = 1
+
+    def __init__(self):
+        super().__init__("winreg")
+        self.values = {}
+
+    def CreateKeyEx(self, root, sub, *a, **kw):
+        return _FakeRegKey(self.values)
+
+    def OpenKey(self, root, sub, *a, **kw):
+        if not self.values:
+            raise FileNotFoundError(2, "Run 键不存在")
+        return _FakeRegKey(self.values)
+
+    def SetValueEx(self, key, name, reserved, rtype, value):
+        key.store[name] = value
+
+    def QueryValueEx(self, key, name):
+        if name not in key.store:
+            raise FileNotFoundError(2, name)
+        return key.store[name], self.REG_SZ
+
+    def DeleteValue(self, key, name):
+        if name not in key.store:
+            raise FileNotFoundError(2, name)
+        del key.store[name]
+
+
+class TestAutostartRunKey(unittest.TestCase):
+    """Run 键命令格式（//B 静默）与"目录被搬走"后的自愈。
+
+    全程用假 winreg + 虚拟文件表，不写真实注册表、不落任何磁盘文件。
+    """
+
+    def setUp(self):
+        self.dir = os.path.abspath("_cna_fake_app")
+        self.other = os.path.abspath("_cna_fake_other")
+        self.vbs = os.path.join(self.dir, cn.DAEMON_VBS_NAME)
+        self.exe = os.path.join(self.dir, "CampusNetAuth.exe")
+        self.files = {self.vbs.lower(), self.exe.lower()}
+        self.reg = _FakeWinreg()
+
+        def _exists(p):
+            try:
+                return os.path.abspath(p).lower() in self.files
+            except Exception:
+                return False
+
+        self._patches = [
+            mock.patch.dict(sys.modules, {"winreg": self.reg}),
+            mock.patch.object(cn, "BASE_DIR", self.dir),
+            mock.patch.object(cn.os.path, "exists", _exists),
+            mock.patch.object(cn, "_clean_legacy_task"),  # 不真跑 schtasks
+            mock.patch.object(cn.sys, "frozen", True, create=True),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self._patches):
+            p.stop()
+
+    def _want(self):
+        return 'wscript.exe //B "%s"' % self.vbs
+
+    def test_cmd_uses_batch_flag(self):
+        """//B 是关键：缺了它，目录被绿色删除后开机会弹模态报错框。"""
+        self.assertEqual(cn._autostart_cmd(), self._want())
+
+    def test_install_writes_batch_cmd(self):
+        self.assertTrue(cn.install_autostart())
+        self.assertEqual(self.reg.values.get(cn.TASK_NAME), self._want())
+
+    def test_health_parses_batch_cmd(self):
+        """健康检查要能跳过 //B 找到引号里的启动器路径。"""
+        cn.install_autostart()
+        self.assertEqual(cn.autostart_health(), (True, ""))
+
+    def test_health_flags_missing_launcher_with_batch_cmd(self):
+        cn.install_autostart()
+        self.files.discard(self.vbs.lower())
+        ok, msg = cn.autostart_health()
+        self.assertFalse(ok)
+        self.assertIn("丢失", msg)
+
+    def test_repair_repoints_moved_folder(self):
+        """目录被搬走（旧路径已不存在）→ 自启改指当前目录。"""
+        old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
+        self.reg.values[cn.TASK_NAME] = old
+        self.assertTrue(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
+
+    def test_repair_upgrades_old_format_in_place(self):
+        """就装在当前目录但命令是旧格式（无 //B）→ 原地升级。"""
+        self.reg.values[cn.TASK_NAME] = 'wscript.exe "%s"' % self.vbs
+        self.assertTrue(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
+
+    def test_repair_leaves_other_live_install(self):
+        """另一份仍然存在的安装：不劫持（测试副本/多副本场景）。"""
+        other_vbs = os.path.join(self.other, cn.DAEMON_VBS_NAME)
+        self.files.add(other_vbs.lower())
+        old = 'wscript.exe "%s"' % other_vbs
+        self.reg.values[cn.TASK_NAME] = old
+        self.assertFalse(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], old)
+
+    def test_repair_noop_when_autostart_absent(self):
+        self.assertFalse(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values, {})
+
+    def test_repair_skipped_when_launcher_absent(self):
+        """当前目录没有启动器（残缺安装）→ 交给健康检查警示，不改写。"""
+        self.files.discard(self.vbs.lower())
+        old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
+        self.reg.values[cn.TASK_NAME] = old
+        self.assertFalse(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], old)
+
+    def test_repair_skipped_in_dev_mode(self):
+        with mock.patch.object(cn.sys, "frozen", False, create=True):
+            old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
+            self.reg.values[cn.TASK_NAME] = old
+            self.assertFalse(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], old)
 
 
 if __name__ == "__main__":
