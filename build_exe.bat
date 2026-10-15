@@ -8,15 +8,18 @@ rem One-click rebuild of CampusNetAuth.exe (single-file modular deliverable).
 rem - --windowed  : GUI subsystem, no console window on double-click (zero black window)
 rem - --workpath  : build dir (single, unified; --clean avoids stale cache reuse)
 rem - --distpath  : output dir
-rem - --add-data  : embed Daemon.vbs / UI.vbs inside the exe (released on demand
-rem                 as components from the UI, modular install/uninstall model)
+rem - --add-data  : embed Daemon.vbs / UI.vbs / CampusNetAuthUninstall.exe inside
+rem                 the exe (released on demand as components from the UI;
+rem                 the uninstaller is released automatically the first time
+rem                 the UI opens - a running exe cannot delete itself, so a
+rem                 separate uninstaller binary is the only way to clean up)
 rem Output: dist\CampusNetAuth.exe (the ONLY deliverable file), then copied
 rem over the project root copy for dev use.
 rem
 rem Sandbox note: PyInstaller 6.x --clean calls os.remove, which the
 rem WorkBuddy shim redirects to the Recycle Bin API (SHFileOperationW)
 rem and crashes inside the sandbox. We bypass the shim by launching
-rem python with -E -S (skip site.py -> sitecustomize never runs) and
+rem python with -E -S (skip site.py, so sitecustomize never runs) and
 rem use _pyinst_wrap.py to locate PyInstaller, re-add site-packages
 rem to sys.path, and generate the exe version resource.
 
@@ -39,8 +42,17 @@ rmdir /s /q dist   2>nul
 
 rem NOTE: --add-data source paths MUST be absolute (%~dp0). Relative paths are
 rem resolved against the spec directory (--specpath), not the CWD, so they break.
-echo === Building (--onefile --windowed, vbs embedded as assets) ===
-"%PY%" -E -S _pyinst_wrap.py --onefile --windowed --name CampusNetAuth --clean --noconfirm --workpath build --distpath dist --specpath build --add-data "%~dp0CampusNetAuthDaemon.vbs;." --add-data "%~dp0CampusNetAuthUI.vbs;." --hidden-import diagnose_probe --hidden-import desktop --hidden-import gui_server --hidden-import webview.platforms.winforms --hidden-import clr_loader campusnet.py
+echo === Building embedded uninstaller (C# micro exe) ===
+call "%~dp0build_uninstaller.bat"
+if errorlevel 1 (
+  echo.
+  echo [ERROR] Uninstaller build failed. See messages above.
+  pause
+  exit /b 1
+)
+
+echo === Building (--onefile --windowed, vbs + uninstaller embedded as assets) ===
+"%PY%" -E -S _pyinst_wrap.py --onefile --windowed --name CampusNetAuth --clean --noconfirm --workpath build --distpath dist --specpath build --add-data "%~dp0CampusNetAuthDaemon.vbs;." --add-data "%~dp0CampusNetAuthUI.vbs;." --add-data "%~dp0build_assets\CampusNetAuthUninstall.exe;." --hidden-import diagnose_probe --hidden-import desktop --hidden-import gui_server --hidden-import webview.platforms.winforms --hidden-import clr_loader campusnet.py
 if errorlevel 1 (
   echo.
   echo [ERROR] Build failed. See messages above.
@@ -62,11 +74,14 @@ if exist "%BAK_CRED%" copy /y "%BAK_CRED%" dist\cred.bin >nul 2>nul
 
 echo.
 echo === Build OK (single-file modular deliverable) ===
-echo   dist\CampusNetAuth.exe   (the ONLY deliverable; vbs embedded inside)
+echo   dist\CampusNetAuth.exe   (the ONLY deliverable; vbs + uninstaller inside)
 echo   CampusNetAuth.exe        (copied to project root, dev copy)
 echo.
 echo Modular model: run the exe anywhere - components (autostart / daemon /
 echo UI launcher) are installed on demand from the UI and released next to
 echo the exe. Config/cred are auto-created on first run.
+echo The uninstaller (CampusNetAuthUninstall.exe) is released automatically
+echo the first time the UI opens, and can also be started from
+echo "CampusNetAuth.exe uninstaller".
 echo.
 pause

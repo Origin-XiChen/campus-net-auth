@@ -125,7 +125,8 @@ def _cleanup_stale_mei(max_age: float = 3600.0) -> int:
 _MEI_CLEANED = _cleanup_stale_mei()
 
 # 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
-APP_VERSION = "0.5.1"
+# 0.5.2 = 内置彻底卸载器（随界面自动释放）+ 守护停机/进程归属硬化
+APP_VERSION = "0.5.2"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1557,6 +1558,11 @@ def cleanup_upgrade_backup():
         return False
 
 
+# 绝不能被当成"升级候选"的同前缀文件名（卸载器 / 历史 daemon exe 副本）。
+# ⚠️ 定义在函数内部：这两个常量在"组件系统"段才声明，位于本函数之后，
+# 模块级求值会 NameError。
+
+
 def find_upgrade_candidate():
     """在程序目录里找"版本比当前更高"的 CampusNetAuth exe。
 
@@ -1572,6 +1578,9 @@ def find_upgrade_candidate():
         return None, None      # 开发态不做自我替换
     cur = self_exe_path()
     cur_key = _ver_key(APP_VERSION)
+    # 卸载器 / 历史 daemon 副本与主程序同前缀，绝不能被当成"更高版本的升级
+    # 候选"（误判会把用户点「立即升级」变成把组件换到主程序位置上）
+    skip = (UNINSTALL_EXE_NAME.lower(), DAEMON_EXE_NAME.lower())
     best = (None, None, ())
     try:
         names = os.listdir(BASE_DIR)
@@ -1584,6 +1593,8 @@ def find_upgrade_candidate():
         if not low.startswith(APP_NAME.lower()):
             continue
         if low.endswith(UPGRADE_BACKUP_SUFFIX.lower()):
+            continue
+        if low in skip:
             continue
         p = os.path.join(BASE_DIR, name)
         if os.path.normcase(os.path.abspath(p)) == cur:
@@ -1677,10 +1688,21 @@ def acquire_singleton():
 
 
 def write_pid():
-    """守护启动时记录自身 PID，便于管理界面精确停止它"""
+    """守护启动时记录自身 PID + 父进程 PID，便于管理界面精确停止它。
+
+    为什么要记父 PID：onefile 打包下"守护"其实是**两个同映像进程**——
+    PyInstaller 引导父进程 P0（解压 _MEI、等子进程退出后清理）与应用子进程
+    P1（真正跑 python 代码、持有单例端口）。只按端口杀 P1 时，P0 仍会短暂
+    存活并**持有 exe 文件句柄**：用户看到"守护已经关了，任务管理器里还有一个
+    CampusNetAuth 在跑"，而且它占着 exe → 删目录/换文件报"文件正在使用中"
+    （WinError 32），这也是历史卸载失败的根因之一。记下 P0 的 PID 才能在
+    停止时把它一起收干净。
+
+    格式：第一行自身 PID，第二行父 PID（旧的单行格式仍可读）。
+    """
     try:
         with open(PID_PATH, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
+            f.write("%d\n%d\n" % (os.getpid(), os.getppid()))
     except Exception:
         pass
 
@@ -1693,32 +1715,49 @@ def remove_pid():
         pass
 
 
-def read_pid():
-    """返回仍然存活的守护进程 PID，否则 None"""
+def read_pid_family():
+    """读 daemon.pid → (pid, ppid)。任一不可解析取 None；文件不存在 (None, None)。
+
+    兼容历史单行格式（老守护只写自身 PID）。"""
     if not os.path.exists(PID_PATH):
-        return None
+        return None, None
     try:
         with open(PID_PATH, "r", encoding="utf-8") as f:
-            pid = int(f.read().strip())
+            lines = [ln.strip() for ln in f.read().splitlines()]
     except Exception:
-        return None
-    if pid <= 0:
-        return None
-    if os.name == "nt":
+        return None, None
+
+    def _num(s):
         try:
-            # PROCESS_QUERY_LIMITED_INFORMATION
-            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return pid
-            return None
+            v = int(s)
+            return v if v > 0 else None
         except Exception:
             return None
-    try:
-        os.kill(pid, 0)
-        return pid
-    except Exception:
+    pid = _num(lines[0]) if lines else None
+    ppid = _num(lines[1]) if len(lines) > 1 else None
+    return pid, ppid
+
+
+def read_pid():
+    """返回仍然存活的守护进程 PID，否则 None。
+
+    ⚠️ 只验"PID 存活"不足以信任：pid 文件可能是硬杀、断电或"整目录复制"留下
+    的陈迹，而 Windows 会**复用 PID** —— 盲信会去杀一个完全无关的用户进程
+    （老实现正是如此，属于真实存在的误杀风险）。
+
+    判定：存活 + 映像确属本程序（打包态）；开发态/取不到映像路径时沿用旧行为
+    （放行），因为那时无法用映像路径认领，而开发环境不存在多份部署混跑。
+    """
+    pid, _ = read_pid_family()
+    if not pid:
         return None
+    if not _proc_alive(pid):
+        return None
+    if _own_exe_path() is not None and _proc_is_own(pid) is False:
+        # PID 已被系统复用给别的进程（或 pid 文件来自另一份部署）
+        log.debug("daemon.pid 指向的 PID=%s 映像不属于本程序，忽略", pid)
+        return None
+    return pid
 
 
 def daemon_running():
@@ -1833,6 +1872,201 @@ def _kill_pid(pid):
         return False
 
 
+# ---------- 进程归属判定（防 PID 复用误杀 / 认领本程序进程族） ----------
+# 为什么需要这一套：
+#   ① **PID 复用**：daemon.pid 可能是硬杀、断电、整目录复制留下的陈迹，其中
+#      记录的 PID 早被系统分配给别的用户进程。老实现只验"PID 存活"就杀，
+#      等于随机杀人（真实风险，非理论问题）。
+#   ② **onefile 双进程**：打包后守护 = 引导父进程 P0（解压 _MEI、等子进程）
+#      + 应用子进程 P1（跑 python、持单例端口）。只按端口杀 P1 会留下 P0，
+#      它持有 exe 文件句柄 → 用户看到"守护关了还有一个 CampusNetAuth 在跑"，
+#      且删目录/换文件报 WinError 32（卸载失败的根因）。
+# 判定依据只有"映像文件全路径 == 当前 exe 文件"：精确到文件，**绝不按映像名
+# 判定**（同名多份部署很常见，按名杀会误伤另一份实例）。
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    """PROCESSENTRY32W（Toolhelp32 进程快照行）"""
+    _fields_ = [("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260)]
+
+
+def _enum_processes():
+    """进程快照 → [(pid, ppid, exe_name_lower)]；失败返回 []。
+
+    纯 PInvoke，零子进程：绝不能改用 tasklist/wmic（GUI 进程起 CUI 子进程会
+    闪终端窗口，见 _port_pid 的长注释）。
+    """
+    out = []
+    if os.name != "nt":
+        return out
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        snap = k32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return out
+        try:
+            pe = _PROCESSENTRY32W()
+            pe.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            ok = k32.Process32FirstW(snap, ctypes.byref(pe))
+            while ok:
+                out.append((int(pe.th32ProcessID),
+                            int(pe.th32ParentProcessID),
+                            (pe.szExeFile or "").lower()))
+                ok = k32.Process32NextW(snap, ctypes.byref(pe))
+        finally:
+            k32.CloseHandle(snap)
+    except Exception:
+        return []
+    return out
+
+
+def _proc_image_path(pid):
+    """进程映像文件的规范全路径（normcase 绝对路径）；取不到返回 None。"""
+    if os.name != "nt":
+        return None
+    try:
+        k32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if not k32.QueryFullProcessImageNameW(h, 0, buf,
+                                                  ctypes.byref(size)):
+                return None
+            p = buf.value
+            return os.path.normcase(os.path.abspath(p)) if p else None
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return None
+
+
+def _proc_alive(pid):
+    """PID 是否存活（Windows 用 OpenProcess 存在性，POSIX 用信号 0）。"""
+    try:
+        pid = int(pid)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _own_exe_path():
+    """本程序自身 exe 的规范路径；开发态返回 None（无法用映像路径认领）。
+
+    刻意只认**当前 exe 文件**：同目录的 `CampusNetAuth (1).exe`（用户下载的
+    新版本）算"另一份部署"，不参与本程序进程族判定 —— 免得把用户手动放进
+    来、可能正在跑的新版本进程当自己人杀掉。
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        return os.path.normcase(os.path.abspath(sys.executable))
+    except Exception:
+        return None
+
+
+def _proc_is_own(pid):
+    """PID 是否确属本程序：True 是 / False 不是 / None 无法判定。
+
+    None 的两种来源：开发态（映像=python.exe，不能用路径认领）、进程已退出
+    或权限不足取不到映像路径。调用方自行决定 None 是保守拒绝还是沿用旧行为。
+    """
+    own = _own_exe_path()
+    if own is None:
+        return None
+    img = _proc_image_path(pid)
+    if img is None:
+        return None
+    return img == own
+
+
+def _kill_if_own(pid, what="进程"):
+    """只在"确认是本程序进程"时终止 PID（开发态判不了归属，放行）。
+
+    返回是否已确认该进程不再存在。这条守卫防的是 PID 复用误杀：pid 文件里的
+    陈旧 PID 可能已属于别人的进程，盲杀等于随机杀人。
+    """
+    if not _proc_alive(pid):
+        return True
+    if _own_exe_path() is not None and _proc_is_own(pid) is not True:
+        log.warning("拒绝终止%s PID=%s：映像不属于本程序（PID 被复用？）",
+                    what, pid)
+        return False
+    return _kill_pid(pid)
+
+
+def own_processes():
+    """以当前 exe 为映像的全部进程 [(pid, ppid, name)]（不含本进程）。
+
+    开发态返回 []（python.exe 太泛，认领会误伤其他 python 程序）。
+    """
+    out = []
+    own = _own_exe_path()
+    if own is None:
+        return out
+    me = os.getpid()
+    own_name = os.path.basename(own)
+    for pid, ppid, name in _enum_processes():
+        if pid == me or name != own_name:
+            continue          # 先用映像名快速过滤，再做全路径确认
+        if _proc_image_path(pid) == own:
+            out.append((pid, ppid, name))
+    return out
+
+
+def daemon_family_pids():
+    """守护进程族 PID（去重、已滤掉非本程序进程）。
+
+    来源互补：① daemon.pid 记录的"应用子进程 + 引导父进程"；② 单例端口
+    占用者及其父进程。pid 文件被删/写失败时靠端口；守护应用进程已被杀、
+    只剩引导父进程时靠 pid 文件里记的父 PID。
+    """
+    cands = list(read_pid_family())
+    owner = _port_pid(SINGLETON_PORT)
+    if owner:
+        cands.append(owner)
+        for pid, ppid, _n in _enum_processes():
+            if pid == owner:
+                cands.append(ppid)
+                break
+    out = []
+    for c in cands:
+        if not c or c in out or not _proc_alive(c):
+            continue
+        if _own_exe_path() is not None and _proc_is_own(c) is not True:
+            continue
+        out.append(c)
+    return out
+
+
 def daemon_pid():
     """返回守护进程 PID（新实例读文件，旧实例从端口查），没有则 None"""
     pid = read_pid()
@@ -1856,40 +2090,72 @@ def _stop_daemon_graceful():
         return False
 
 
-def stop_daemon():
-    """停止后台守护，返回是否成功（找不到进程时返回 False）。
+def stop_daemon(wait_timeout=8.0):
+    """停止后台守护，返回是否彻底停止（**幂等**：本来没在跑也算成功）。
 
-    优先优雅停止（守护监听单例端口，收到 STOP 自行退出，零残留）；
-    指令发送失败（守护已死/端口异常）时回退按 PID 终止。
+    步骤刻意保守：
+      1. 优雅停止：连单例端口发 STOP，守护自行退出（零残留）；
+      2. STOP 不管用（守护正忙于一轮探测，最长 8s 才回到可中断等待）→ 按端口
+         占用者 PID 强杀，**先验映像归属**（防 PID 复用误杀）；
+      3. 收尾整个守护进程族：onefile 的引导父进程会持有 exe 文件句柄，只停
+         应用子进程会留下它 —— 用户看到"守护关了还有一个 CampusNetAuth 在
+         跑"，且它占着 exe 使卸载/替换报 WinError 32。
     兼容旧版 Daemon.exe 副本启动的守护（同样监听单例端口）。
     """
-    pid = read_pid() or _port_pid(SINGLETON_PORT)
-    graceful = False
-    if pid or daemon_running():
-        graceful = _stop_daemon_graceful()
-    if not graceful:
-        if not pid:
-            return False
-        try:
-            ok = _kill_pid(pid)
-            if not ok:
-                log.error("停止守护失败：无法终止进程 PID=%s", pid)
-        except Exception as e:
-            log.error("停止守护失败: %r", e)
-            ok = False
-    # 等待守护退出（端口释放 + pid 文件清理），最多 ~6s
-    deadline = time.time() + 6
+    family = daemon_family_pids()
+    if not family and not daemon_running():
+        remove_pid()
+        return True                       # 幂等：没在跑 = 已经是停止状态
+
+    graceful = _stop_daemon_graceful() if daemon_running() else False
+
+    # 等守护自己退出（端口释放）
+    deadline = time.time() + (6.0 if graceful else 0.5)
     while time.time() < deadline:
         if not daemon_running():
             break
         time.sleep(0.3)
-    # 兜底：进程未按预期退出时，按端口占用者 PID 强杀
-    leftover = _port_pid(SINGLETON_PORT)
-    if leftover:
-        _kill_pid(leftover)
-    remove_pid()
-    alive = daemon_running()
-    if not alive:
+
+    if daemon_running():
+        # STOP 没生效：按端口占用者强杀（归属校验后才动手）
+        leftover = _port_pid(SINGLETON_PORT)
+        if leftover:
+            _kill_if_own(leftover, "守护")
+
+    # 等端口真正释放（强杀是异步的）
+    deadline = time.time() + max(0.0, float(wait_timeout))
+    while time.time() < deadline and daemon_running():
+        time.sleep(0.2)
+
+    # 收尾进程族：引导父进程、以及刚被强杀仍在退出中的子进程。
+    # ⚠️ 顺序很关键：onefile 的引导父进程在子进程退出后会**自己**收尾
+    # （清掉 _MEI 解包目录 + 以子进程的退出码退出，所以优雅停止时我们看到的
+    # rc 就是 0）。所以先让它自然退出，只有赖着不走才强杀——强杀会跳过它的
+    # _MEI 清理（留下解包残渣），还会把退出码变成 1（被看门狗/冒烟当成
+    # "非优雅退出"，历史上就踩过这个坑）。
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if not daemon_running() and not daemon_family_pids():
+            break
+        time.sleep(0.2)
+
+    for p in dict.fromkeys(list(family) + daemon_family_pids()):
+        _kill_if_own(p, "守护进程族")
+
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        if not daemon_running() and not daemon_family_pids():
+            break
+        time.sleep(0.2)
+
+    alive_pids = daemon_family_pids()
+    alive = daemon_running() or bool(alive_pids)
+    if alive:
+        # ⚠️ 停不干净时**保留 pid 文件**：下次停止/卸载才有线索找到残留的
+        # 引导父进程（老实现无论成败都删，等于把唯一的线索丢掉了）
+        log.error("守护停止未彻底：仍有进程存活 %s（pid 文件已保留）", alive_pids)
+    else:
+        remove_pid()
         log.info("守护已停止")
     return not alive
 
@@ -2359,12 +2625,26 @@ def pythonw_path():
 DAEMON_EXE_NAME = "CampusNetAuthDaemon.exe"
 DAEMON_VBS_NAME = "CampusNetAuthDaemon.vbs"
 UI_VBS_NAME = "CampusNetAuthUI.vbs"
+# 内置卸载器（微 exe，约 15KB）：随主 exe 一起打包（--add-data），首次打开
+# 界面时释放到程序目录。之所以必须是**独立文件**而不是"主 exe 的某个参数"：
+# Windows 上正在运行的 exe 文件被系统锁定，无法删除自己；只有另一个 exe
+# 才能把主 exe（以及它的整目录）彻底删干净。
+UNINSTALL_EXE_NAME = "CampusNetAuthUninstall.exe"
 
 # 程序自身产生的全部文件（foreign_files 里排除，避免把自家产物当"无关文件"）
 _PRODUCT_FILES = (
-    DAEMON_EXE_NAME, DAEMON_VBS_NAME, UI_VBS_NAME,
+    DAEMON_EXE_NAME, DAEMON_VBS_NAME, UI_VBS_NAME, UNINSTALL_EXE_NAME,
     "config.json", "cred.bin", "state.json",
     "campusnet.log", "daemon.pid", "_ui_trace.log", "_ui_crash.log",
+    # 自启启动器 vbs 启动失败时写的容错日志（vbs 侧写，之前漏登记 →
+    # 全新部署横幅会把它当成"无关文件"）
+    "autostart.log",
+)
+# 轮转日志（RotatingFileHandler backupCount=3）、原子写残渣、升级备份：
+# 卸载时必须一并清掉，否则"看起来删了、其实留了一地"
+_PRODUCT_GLOBS = (
+    "campusnet.log.*", "state.json.lock", "config.json.tmp",
+    "state.json.tmp", "*.old.exe",
 )
 # 判定"是否全新部署"只认部署产物（不认运行时文件 log/pid，
 # 否则首次启动瞬间就会被视为已部署，空文件夹提醒失效）
@@ -2376,12 +2656,17 @@ _DEPLOY_MARKERS = (
 
 def _asset_path(name):
     """内置资源路径：打包态在 PyInstaller 解包目录（--add-data），
-    开发态直接读脚本所在目录的源文件。"""
+    开发态直接读脚本所在目录的源文件（卸载器则读 build_assets\\，
+    它由 build_uninstaller.bat 编译产出，开发态也能验证释放链路）。"""
     if getattr(sys, "frozen", False):
         p = os.path.join(getattr(sys, "_MEIPASS", ""), name)
         if os.path.exists(p):
             return p
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(here, name)
+    if os.path.exists(p):
+        return p
+    return os.path.join(here, "build_assets", name)
 
 
 def release_asset(name, force=False):
@@ -2421,6 +2706,48 @@ def _remove_file(name):
             time.sleep(0.3)
     log.error("移除 %s 失败: %r", name, last_err)
     return False
+
+
+def uninstaller_path():
+    """内置卸载器在程序目录里的路径。"""
+    return os.path.join(BASE_DIR, UNINSTALL_EXE_NAME)
+
+
+def uninstaller_available():
+    """卸载器是否已就位（界面据此启用「彻底卸载」入口）。"""
+    return os.path.exists(uninstaller_path())
+
+
+def ensure_uninstaller(force=False):
+    """把内置卸载器释放到程序目录（每次打开界面时调用，幂等）。
+
+    * 已存在且与内置资源**大小一致** → 视为已就绪（升级换了主 exe 时大小
+      会变 → 自动刷新，避免留下旧版卸载器）；
+    * 内置资源缺失（构建时没打进）→ 只记日志并返回 False，绝不生成空文件；
+    * 卸载器正在运行（文件被占用）导致复制失败 → 视为已就绪（在用就是可用）。
+    返回卸载器是否可用。
+    """
+    src = _asset_path(UNINSTALL_EXE_NAME)
+    dst = uninstaller_path()
+    if not os.path.exists(src):
+        log.warning("内置卸载器缺失（打包时未打入 %s）；请用 build_exe.bat "
+                    "重新构建", UNINSTALL_EXE_NAME)
+        return False
+    if not force:
+        try:
+            if (os.path.exists(dst)
+                    and os.path.getsize(dst) == os.path.getsize(src)):
+                return True
+        except OSError:
+            pass
+    try:
+        shutil.copy2(src, dst)
+        log.info("已释放卸载器: %s", dst)
+        return True
+    except Exception as e:  # noqa: BLE001
+        # 卸载器正在运行时文件被占用，复制失败属正常（旧版仍在用即已就绪）
+        log.debug("释放卸载器失败（可能正在运行）: %r", e)
+        return os.path.exists(dst)
 
 
 def first_deploy():
@@ -3126,6 +3453,32 @@ def cmd_uninstall(args):
     return 0 if uninstall_autostart() else 1
 
 
+def cmd_uninstaller(args):
+    """释放内置卸载器并启动它（在它自己的窗口里确认后彻底清理）。
+
+    ⚠️ 用 DETACHED_PROCESS 启动：卸载器会在确认后**连本进程一起收掉**
+    （本进程就是程序目录里的 CampusNetAuth.exe），必须脱离父子关系，
+    否则本进程被终止时它会被连带影响。
+    """
+    attach_console()
+    if not ensure_uninstaller(force=True):
+        print("内置卸载器不可用：打包时未打入 %s，请重新构建"
+              % UNINSTALL_EXE_NAME)
+        return 1
+    exe = uninstaller_path()
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    try:
+        subprocess.Popen([exe], cwd=BASE_DIR, creationflags=flags,
+                         close_fds=True)
+    except Exception as e:
+        log.error("启动卸载器失败: %r", e)
+        print("启动卸载器失败: %r" % (e,))
+        return 1
+    print("卸载程序已启动：%s" % exe)
+    return 0
+
+
 def cmd_start(args):
     """启动后台守护（等价于 UI 里的「启动守护」）"""
     return 0 if start_daemon() else 1
@@ -3153,6 +3506,13 @@ def cmd_ui(args):
     force_utf8_console()
     hide_console()  # 双击 exe 时消除黑窗；从 cmd 前台运行时不动父控制台
     repair_autostart_cmd()  # 目录被搬走/改名后自愈自启指向（静默，失败无感）
+    # 「打开主 exe 即自动释放卸载器」：Windows 下运行中的 exe 无法删除自己，
+    # 彻底卸载必须有独立的卸载程序。这里静默释放到 exe 同目录，失败无感
+    # （不阻断界面启动）。
+    try:
+        ensure_uninstaller()
+    except Exception as e:  # noqa: BLE001
+        log.debug("释放卸载器失败: %r", e)
     # ---- HTML UI（pywebview）优先 ----
     # 注意：desktop.main() 阻塞直到窗口关闭；仅当 pywebview 缺失或
     # WebView2 初始化失败时才快速返回/抛异常 → 回退 tkinter。
@@ -3314,6 +3674,9 @@ def main():
     sub.add_parser("logout", help="下线").set_defaults(func=cmd_logout)
     sub.add_parser("install", help="安装开机自启").set_defaults(func=cmd_install)
     sub.add_parser("uninstall", help="移除开机自启").set_defaults(func=cmd_uninstall)
+    sub.add_parser("uninstaller",
+                   help="释放并打开彻底卸载程序（清空本目录全部产物）"
+                   ).set_defaults(func=cmd_uninstaller)
     p_diag = sub.add_parser("diagnose",
                             help="门户抓取诊断（持续监控 + 自动取证）")
     p_diag.add_argument("--interval", type=int, default=5,

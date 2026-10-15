@@ -11,7 +11,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile check (all Python sources)
-        run: python -m py_compile campusnet.py gui_server.py desktop.py ui.py diagnose_probe.py smoke_regression.py smoke_state_write.py e2e_test.py
+        run: python -m py_compile campusnet.py gui_server.py desktop.py ui.py diagnose_probe.py smoke_regression.py smoke_state_write.py smoke_uninstall.py e2e_test.py
+      - name: Build embedded uninstaller (C# via csc.exe from .NET Framework)
+        run: cmd /c build_uninstaller.bat
+      - name: Verify uninstaller artifact
+        run: |
+          python -c "import os; p='build_assets/CampusNetAuthUninstall.exe'; assert os.path.exists(p), p; print('uninstaller bytes:', os.path.getsize(p))"
+      - name: Uninstaller end-to-end (isolated dir, silent, no network)
+        run: python smoke_uninstall.py
       - name: Unit tests (offline, no network)
         run: python -m unittest discover -s tests -v
       - name: Frontend JS syntax check (INDEX_HTML embedded in gui_server.py)

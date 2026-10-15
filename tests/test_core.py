@@ -1004,5 +1004,216 @@ class TestAutostartRunKey(unittest.TestCase):
         self.assertEqual(self.reg.values[cn.TASK_NAME], old)
 
 
+class _PidFileMixin(unittest.TestCase):
+    """把 daemon.pid 重定向到仓库根下的临时文件（沙箱只放行 1~2 层新文件）。"""
+
+    def setUp(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._pidfile = os.path.join(root, "_test_pid_%d" % os.getpid())
+        self._saved = cn.PID_PATH
+        cn.PID_PATH = self._pidfile
+        try:
+            os.remove(self._pidfile)
+        except OSError:
+            pass
+
+    def tearDown(self):
+        cn.PID_PATH = self._saved
+        try:
+            os.remove(self._pidfile)
+        except OSError:
+            pass
+
+
+class TestDaemonPidFiles(_PidFileMixin):
+    """daemon.pid 读写 + **PID 复用防误杀**（"停止守护"链路的安全前提）。"""
+
+    def test_write_read_family_roundtrip(self):
+        """记录 自身 PID + 引导父进程 PID（onefile 下守护是两个同映像进程）。"""
+        with mock.patch.object(cn.os, "getpid", return_value=4321), \
+                mock.patch.object(cn.os, "getppid", return_value=4320):
+            cn.write_pid()
+        self.assertEqual(cn.read_pid_family(), (4321, 4320))
+
+    def test_legacy_single_line_pid_file(self):
+        """老守护只写一行自身 PID：升级混跑期间仍要能读。"""
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("777")
+        self.assertEqual(cn.read_pid_family(), (777, None))
+
+    def test_garbage_pid_file_is_ignored(self):
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("not-a-pid\n\n")
+        self.assertEqual(cn.read_pid_family(), (None, None))
+
+    def test_read_pid_ignores_reused_pid(self):
+        """pid 文件里的 PID 还活着，但映像已属于**别的进程**（PID 复用）→
+        必须不返回它，否则 stop_daemon 会去杀一个无关的用户进程。"""
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("888\n887\n")
+        with mock.patch.object(cn, "_proc_alive", return_value=True), \
+                mock.patch.object(cn, "_own_exe_path", return_value="x.exe"), \
+                mock.patch.object(cn, "_proc_is_own", return_value=False):
+            self.assertIsNone(cn.read_pid())
+
+    def test_read_pid_accepts_own_process(self):
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("888\n887\n")
+        with mock.patch.object(cn, "_proc_alive", return_value=True), \
+                mock.patch.object(cn, "_own_exe_path", return_value="x.exe"), \
+                mock.patch.object(cn, "_proc_is_own", return_value=True):
+            self.assertEqual(cn.read_pid(), 888)
+
+    def test_read_pid_dev_mode_keeps_legacy_behaviour(self):
+        """开发态（python 解释器）无法用映像路径认领 → 沿用旧行为放行。"""
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("889\n887\n")
+        with mock.patch.object(cn, "_proc_alive", return_value=True), \
+                mock.patch.object(cn, "_own_exe_path", return_value=None):
+            self.assertEqual(cn.read_pid(), 889)
+
+
+class TestKillGuard(unittest.TestCase):
+    """_kill_if_own：只杀确认属于本程序的进程（防 PID 复用误杀）。"""
+
+    def test_refuses_foreign_process(self):
+        with mock.patch.object(cn, "_proc_alive", return_value=True), \
+                mock.patch.object(cn, "_own_exe_path", return_value="x.exe"), \
+                mock.patch.object(cn, "_proc_is_own", return_value=False), \
+                mock.patch.object(cn, "_kill_pid") as kl:
+            self.assertFalse(cn._kill_if_own(1234, "守护"))
+        kl.assert_not_called()
+
+    def test_kills_own_process(self):
+        with mock.patch.object(cn, "_proc_alive", return_value=True), \
+                mock.patch.object(cn, "_own_exe_path", return_value="x.exe"), \
+                mock.patch.object(cn, "_proc_is_own", return_value=True), \
+                mock.patch.object(cn, "_kill_pid", return_value=True) as kl:
+            self.assertTrue(cn._kill_if_own(1234, "守护"))
+        kl.assert_called_once_with(1234)
+
+    def test_dead_process_counts_as_done(self):
+        with mock.patch.object(cn, "_proc_alive", return_value=False), \
+                mock.patch.object(cn, "_kill_pid") as kl:
+            self.assertTrue(cn._kill_if_own(1234))
+        kl.assert_not_called()
+
+
+class TestStopDaemon(_PidFileMixin):
+    """stop_daemon：幂等 + 收尾整个守护进程族（引导父进程占住 exe 是
+    "守护关了却删不掉文件"的根因）。"""
+
+    def test_idempotent_when_not_running(self):
+        with mock.patch.object(cn, "daemon_family_pids", return_value=[]), \
+                mock.patch.object(cn, "daemon_running", return_value=False), \
+                mock.patch.object(cn, "_stop_daemon_graceful") as g:
+            self.assertTrue(cn.stop_daemon())
+        g.assert_not_called()                    # 没在跑就别去连端口
+
+    def test_kills_leftover_bootloader_parent(self):
+        """守护应用进程已死、只剩 onefile 引导父进程（无端口占用）时，
+        必须靠 pid 文件里的父 PID 把它收掉，否则 exe 一直被锁。"""
+        fam = [[5001, 5000], [], [], []]
+        with mock.patch.object(cn, "daemon_family_pids",
+                               side_effect=lambda: fam.pop(0) if fam else []), \
+                mock.patch.object(cn, "daemon_running", return_value=False), \
+                mock.patch.object(cn, "_kill_if_own", return_value=True) as kl:
+            self.assertTrue(cn.stop_daemon())
+        killed = sorted(c[0][0] for c in kl.call_args_list)
+        self.assertEqual(killed, [5000, 5001])
+
+    def test_keeps_pid_file_when_stop_incomplete(self):
+        """停不干净时必须**保留** pid 文件 —— 它是下次找到残留进程的唯一线索
+        （老实现无论成败都删，等于把线索丢掉，于是残留进程再也停不掉）。"""
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("6001\n6000\n")
+        with mock.patch.object(cn, "daemon_family_pids",
+                               return_value=[6001]), \
+                mock.patch.object(cn, "daemon_running", return_value=False), \
+                mock.patch.object(cn, "_kill_if_own", return_value=False):
+            self.assertFalse(cn.stop_daemon())
+        self.assertTrue(os.path.exists(cn.PID_PATH))
+
+    def test_removes_pid_file_when_clean(self):
+        with open(cn.PID_PATH, "w", encoding="utf-8") as f:
+            f.write("6101\n6100\n")
+        fam = [[6101], [], []]
+        with mock.patch.object(cn, "daemon_family_pids",
+                               side_effect=lambda: fam.pop(0) if fam else []), \
+                mock.patch.object(cn, "daemon_running", return_value=False), \
+                mock.patch.object(cn, "_kill_if_own", return_value=True):
+            self.assertTrue(cn.stop_daemon())
+        self.assertFalse(os.path.exists(cn.PID_PATH))
+
+
+class TestUninstallerRelease(unittest.TestCase):
+    """内置卸载器：必须随主 exe 打包、打开界面时释放、且不被升级扫描误认。
+
+    它存在的根因：Windows 下**运行中的 exe 无法删除自己**，彻底卸载必须由
+    另一个 exe 完成。
+    """
+
+    def setUp(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._dir = os.path.join(root, "_test_unins_%d" % os.getpid())
+        os.makedirs(self._dir, exist_ok=True)
+        self._saved_base = cn.BASE_DIR
+        self._asset = os.path.join(self._dir, "asset.bin")
+        with open(self._asset, "wb") as f:
+            f.write(b"FAKE-UNINSTALLER-PAYLOAD")
+        cn.BASE_DIR = self._dir
+
+    def tearDown(self):
+        cn.BASE_DIR = self._saved_base
+        for name in os.listdir(self._dir):
+            try:
+                os.remove(os.path.join(self._dir, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(self._dir)
+        except OSError:
+            pass
+
+    def test_release_then_idempotent(self):
+        with mock.patch.object(cn, "_asset_path", return_value=self._asset):
+            self.assertFalse(cn.uninstaller_available())
+            self.assertTrue(cn.ensure_uninstaller())
+            self.assertTrue(cn.uninstaller_available())
+            # 第二次：大小一致 → 不再复制（幂等）
+            with mock.patch.object(cn.shutil, "copy2") as cp:
+                self.assertTrue(cn.ensure_uninstaller())
+            cp.assert_not_called()
+
+    def test_refreshes_when_size_differs(self):
+        """主 exe 升级后内置资源变了 → 必须刷新同目录的旧卸载器。"""
+        dst = cn.uninstaller_path()
+        with open(dst, "wb") as f:
+            f.write(b"OLD")
+        with mock.patch.object(cn, "_asset_path", return_value=self._asset):
+            self.assertTrue(cn.ensure_uninstaller())
+        self.assertEqual(os.path.getsize(dst), os.path.getsize(self._asset))
+
+    def test_missing_asset_does_not_create_empty_file(self):
+        missing = os.path.join(self._dir, "nope.bin")
+        with mock.patch.object(cn, "_asset_path", return_value=missing):
+            self.assertFalse(cn.ensure_uninstaller())
+        self.assertFalse(os.path.exists(cn.uninstaller_path()))
+
+    def test_not_taken_as_upgrade_candidate(self):
+        """卸载器与主程序同前缀（CampusNetAuth*.exe），绝不能被当成"更高版本"
+        —— 否则用户点「立即升级」会把卸载器换到主程序位置上。"""
+        names = [cn.UNINSTALL_EXE_NAME, cn.DAEMON_EXE_NAME]
+        with mock.patch.object(cn.sys, "frozen", True, create=True), \
+                mock.patch.object(cn, "self_exe_path",
+                                  return_value="c:\\x\\campusnetauth.exe"), \
+                mock.patch.object(cn.os, "listdir", return_value=names), \
+                mock.patch.object(cn, "pe_version",
+                                  return_value=("9.9.9", cn.APP_NAME)):
+            path, ver = cn.find_upgrade_candidate()
+        self.assertIsNone(path)
+        self.assertIsNone(ver)
+
+
 if __name__ == "__main__":
     unittest.main()

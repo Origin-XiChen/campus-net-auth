@@ -10,11 +10,13 @@ daemon.pid
 # ===== 构建产物（打包输出与中间文件）=====
 dist/
 build/
+build_assets/
 build_new_*/
 dist_new_*/
 *.spec
 CampusNetAuth.exe
 CampusNetAuthDaemon.exe
+CampusNetAuthUninstall.exe
 
 # ===== Python =====
 __pycache__/
@@ -28,12 +30,24 @@ __pycache__/
 _audit_report.txt
 _smoke_result.txt
 _verify_modular.py
+# 开发态深度验证脚本（需要真实部署/打包产物，不进 CI）
+_verify_api.py
+_verify_uninstall_exe.py
+# 跑完会动自启项/守护的脚本之后，用它把用户真实部署恢复原状
+_restore_deploy.py
 e2e_result.txt
 HANDOVER.md
+
+# ===== 临时验证目录（端到端测试自建）=====
+_probe_tmp*/
+_verify*/
+_test_tmp/
 
 # ===== 单测 / 构建临时产物（跑测试与打包时会自动生成）=====
 _test_state_*
 _test_config_*
+_test_pid_*
+_test_unins_*/
 file_version_info.txt
 ._last_build_ts
 _t_*.py

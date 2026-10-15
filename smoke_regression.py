@@ -241,13 +241,23 @@ def main():
     if not os.path.exists(src_exe):
         check("dist 交付 exe 存在", False, src_exe)
         return 2
+    VERIFY = os.path.join(tempfile.gettempdir(),
+                          "cna_smoke_%d" % int(time.time()))
+    os.makedirs(VERIFY, exist_ok=True)
+    shutil.copy2(src_exe, os.path.join(VERIFY, "CampusNetAuth.exe"))
     # exe 自报版本（顺带验证 CLI --version 可用）。
+    # 刻意跑 %TEMP% 里的**副本**而不是 dist 原件：onefile 会把整包解到 %TEMP%
+    # 再启动子进程，仓库目录上可能存在宿主环境注入的拒绝型 ACL（本机就有一条
+    # `Everyone:(CI)(DENY)(DC)`，会让"从仓库目录里启动 onefile exe"整体失败，
+    # 与代码无关 —— 新旧构建表现一致，且换成工作区外任意路径都正常）。
+    # 复制后运行也正是用户的真实用法。
     # ⚠️ 打包态 CLI 面向 cmd.exe 输出，编码是**系统 locale（中文 Windows=GBK）**，
     # 用 text=True 会按 UTF-8 解码抛 UnicodeDecodeError，必须显式解码。
     global APP_VER
     try:
-        vr = subprocess.run([src_exe, "--version"], capture_output=True,
-                            timeout=60)
+        vr = subprocess.run([os.path.join(VERIFY, "CampusNetAuth.exe"),
+                             "--version"], cwd=VERIFY, capture_output=True,
+                            timeout=120)
         APP_VER = (vr.stdout or b"").decode("gbk", "replace").strip()
         if not APP_VER:
             APP_VER = (vr.stdout or b"").decode("utf-8", "replace").strip()
@@ -255,10 +265,6 @@ def main():
         rec("  [警告] 读取 exe 版本失败: %r" % e)
     check("exe --version 可用", APP_VER.startswith("CampusNetAuth"), APP_VER)
     APP_VER = APP_VER.replace("CampusNetAuth", "").strip()
-    VERIFY = os.path.join(tempfile.gettempdir(),
-                          "cna_smoke_%d" % int(time.time()))
-    os.makedirs(VERIFY, exist_ok=True)
-    shutil.copy2(src_exe, os.path.join(VERIFY, "CampusNetAuth.exe"))
     # 守护角色需要凭据才不会 rc=1 退出
     with open(os.path.join(VERIFY, "config.json"), "w", encoding="utf-8") as f:
         json.dump({"portal_host": "172.16.54.18", "username": "smoke_test"}, f)
@@ -294,9 +300,16 @@ def main():
     exe = os.path.join(VERIFY, "CampusNetAuth.exe")
     trace = os.path.join(VERIFY, "_ui_trace.log")
 
-    # 基线：确保没有真实守护占用单例端口
+    # 基线：确保没有真实守护占用单例端口。
+    # ⚠️ 但用户/开发机上的真实守护是**在用的**：记下它、测完原样拉起来，
+    # 否则跑一次冒烟就把别人的守护停了（本脚本早期版本就有这个副作用）。
+    restore_daemon = None
     if cn.daemon_running():
-        rec("[准备] 已有守护在跑，先优雅停止")
+        ok, _ver, dpath, _detail = cn.daemon_info()
+        if ok and dpath and os.path.exists(dpath):
+            restore_daemon = dpath
+        rec("[准备] 已有守护在跑（%s），先优雅停止，测试结束会重新拉起"
+            % (restore_daemon or "路径未知"))
         cn.stop_daemon()
         time.sleep(2)
 
@@ -336,6 +349,8 @@ def main():
     for k in ("online", "autostart", "autostart_health", "daemon",
               "daemon_pid", "components", "first_deploy", "foreign_files",
               "last_error", "events", "cfg", "host", "interval", "username",
+              # 独立卸载器（打开界面时自动释放到 exe 同目录）
+              "uninstaller",
               # 守护版本体检（升级自愈）：界面据这些字段提示/自动重启陈旧守护
               "daemon_version", "daemon_stale", "daemon_stale_reason",
               "upgrade", "app_version"):
@@ -394,6 +409,27 @@ def main():
     check("connect 恰好一段响应（回归双响应 bug）", n200 == 1, "段数=%d" % n200)
     check("connect 返回真实结果（非裸 ok:true）", body != b'{"ok": true}',
           body[:100].decode("utf-8", "replace"))
+
+    # ========== 2.6 独立卸载器（打开主 exe 自动释放）==========
+    rec("\n===== 2.6 内置卸载器自动释放 =====")
+    unins = os.path.join(VERIFY, cn.UNINSTALL_EXE_NAME)
+    check("status.uninstaller 透出就绪", st.get("uninstaller") is True,
+          "uninstaller=%r" % st.get("uninstaller"))
+    check("打开界面即释放卸载器到 exe 同目录", os.path.exists(unins), unins)
+    if os.path.exists(unins):
+        size = os.path.getsize(unins)
+        check("卸载器体积合理（微 exe，非空文件）", 4096 < size < 5 * 1024 * 1024,
+              "%d bytes" % size)
+        with open(unins, "rb") as f:
+            sig = f.read(2)
+        check("卸载器是合法 PE（MZ 头）", sig == b"MZ", repr(sig))
+        # 关键：卸载器与主程序同前缀，绝不能被升级扫描当成"更高版本候选"
+        uver, uprod = cn.pe_version(unins)
+        check("卸载器不会自报为 CampusNetAuth 升级候选",
+              (not uver) or (uprod != cn.APP_NAME),
+              "version=%r product=%r" % (uver, uprod))
+        check("卸载器不在 foreign_files（属自家产物）",
+              cn.UNINSTALL_EXE_NAME not in (st.get("foreign_files") or []))
 
     # ========== 3. 组件状态 ==========
     rec("\n===== 3. 组件安装 / 状态 / 卸载 =====")
@@ -491,6 +527,29 @@ def main():
         time.sleep(1)
     check("守护启动（端口 %d）" % cn.SINGLETON_PORT, started,
           "pid=%s" % cn.daemon_pid())
+
+    # ⚠️ 必须先等它跑完本轮（**本次启动后**的日志里出现"存活心跳"）再停，否则若
+    # 恰好在一次阻塞 HTTP 探测中途发 STOP，守护要等探测结束才回到 select 收到
+    # 指令；而 stop_daemon 的优雅等待只有 6s，超时就会强杀 —— 那种情况下退出码
+    # 是 1（被 TerminateProcess），属于"守护正忙"的正常兜底，不是回归。
+    # 这里要验的是"空闲守护收到 STOP 会优雅退出（rc=0）"，所以先等它空闲。
+    # 注意要从**新增**日志里找心跳：VERIFY/campusnet.log 前面几节已经写过心跳，
+    # 直接全文搜会立刻命中旧行（踩过一次）。
+    dlog = os.path.join(VERIFY, "campusnet.log")
+    try:
+        off = os.path.getsize(dlog)
+    except OSError:
+        off = 0
+    t_idle = time.time()
+    while time.time() - t_idle < 30:
+        try:
+            with open(dlog, encoding="utf-8", errors="replace") as f:
+                f.seek(off)
+                if "存活心跳" in f.read():
+                    break
+        except OSError:
+            pass
+        time.sleep(1)
     cn.stop_daemon()
     t0 = time.time()
     while dp.poll() is None and time.time() - t0 < 20:
@@ -503,6 +562,22 @@ def main():
     time.sleep(2)
     new_mei2 = sorted(mei_set() - mei_before2)
     check("守护退出无 _MEI 残留", not new_mei2, str(new_mei2))
+
+    # ========== 7. 收尾：把测试前就在跑的真实守护拉回来 ==========
+    if restore_daemon:
+        rec("\n===== 7. 恢复测试前的真实守护 =====")
+        try:
+            subprocess.Popen([restore_daemon, "daemon"],
+                             cwd=os.path.dirname(restore_daemon))
+            back = False
+            for _ in range(60):
+                if cn.daemon_running():
+                    back = True
+                    break
+                time.sleep(1)
+            check("真实守护已恢复运行", back, restore_daemon)
+        except Exception as e:  # noqa: BLE001
+            check("真实守护已恢复运行", False, repr(e))
 
     shutil.rmtree(VERIFY, ignore_errors=True)
     return 0

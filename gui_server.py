@@ -119,6 +119,8 @@ def _status_payload() -> dict:
         "interval": cfg.get("interval", ""),
         "cfg": cfg,
         "components": cn.components_status(),
+        # 独立卸载器是否已释放到程序目录（界面据此启用「彻底卸载」入口）
+        "uninstaller": cn.uninstaller_available(),
         "first_deploy": cn.FIRST_DEPLOY,
         "foreign_files": foreign,
         # 守护最近一次"致命登录失败"提示（账号/密码问题等），成功后自动清除
@@ -496,6 +498,29 @@ class Handler(BaseHTTPRequestHandler):
                 ok, msg = cn.uninstall_component((data or {}).get("name", ""))
                 self._json({"ok": ok, "message": msg,
                             "components": cn.components_status()})
+            elif path == "/api/uninstall":
+                # 彻底卸载：释放并拉起同目录的独立卸载器。
+                # ⚠️ 必须在**独立进程**里做：Windows 下运行中的主 exe 无法删除
+                # 自己（文件被系统锁定），只有另一个 exe 才能把整个目录清干净。
+                # 卸载器有自己的确认窗口，这里只负责把它拉起来。
+                ok = cn.ensure_uninstaller(force=True)
+                if not ok:
+                    self._json({"ok": False,
+                                "error": "内置卸载器不可用（打包时未打入 %s）"
+                                         % cn.UNINSTALL_EXE_NAME})
+                else:
+                    flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                    # 先关掉本地服务：卸载器马上会终止本进程，别让它卡在
+                    # 一个正在被杀的 HTTP 服务上（前端已收到响应）
+                    try:
+                        subprocess.Popen([cn.uninstaller_path()],
+                                         cwd=cn.BASE_DIR,
+                                         creationflags=flags, close_fds=True)
+                        self._json({"ok": True,
+                                    "message": "卸载程序已启动，请在弹出的窗口里确认"})
+                    except Exception as e:  # noqa: BLE001
+                        self._json({"ok": False, "error": "%r" % e})
             elif path == "/api/daemon/refresh":
                 # 守护版本自愈：旧版本守护立刻重启，让新功能生效。
                 # 走后台任务：体检要访问控制通道，可能等 1~3s。
@@ -1164,6 +1189,14 @@ input{font-family:inherit;font-size:inherit}
             <button class="btn btn-ghost" id="btnCompUiIns" style="flex-shrink:0">安装</button>
             <button class="btn btn-ghost" id="btnCompUiUnins" style="flex-shrink:0">卸载</button>
           </div>
+          <div class="comp-row">
+            <div class="comp-info">
+              <div class="comp-name">彻底卸载本程序</div>
+              <div class="comp-sub">打开同目录的 <b id="uninsName">CampusNetAuthUninstall.exe</b>：停守护 → 删自启 → 清空本目录全部产物与缓存</div>
+            </div>
+            <span class="comp-state" id="compUninsState">—</span>
+            <button class="btn btn-danger" id="btnPurge" style="flex-shrink:0">彻底卸载</button>
+          </div>
           <div class="hint" style="margin-top:12px">config.json / cred.bin 等配置数据首次运行自动生成，不属于组件</div>
         </div>
 
@@ -1444,6 +1477,17 @@ async function load(){
   $('#btnCompUiIns').disabled = compUi !== 'missing';
   $('#btnCompUiUnins').disabled = compUi === 'missing';
 
+  // 卸载器（主 exe 打开时自动释放到同目录；它是唯一能删掉主 exe 的东西）
+  const cUn = $('#compUninsState');
+  if (st.uninstaller) {
+    cUn.textContent = '已就绪'; cUn.className = 'comp-state ok';
+    $('#btnPurge').disabled = false;
+  } else {
+    cUn.textContent = '未释放'; cUn.className = 'comp-state warn';
+    $('#btnPurge').disabled = true;
+    cUn.title = '内置卸载器未释放：可能构建时没打入，请重新构建或重新下载';
+  }
+
   // 守护按钮按上下文启用（未装值守组件时禁用并提示）
   const daemonOk = compDaemon === 'installed';
   $('#btnDStart').disabled = !!st.daemon || !daemonOk;
@@ -1698,6 +1742,24 @@ $('#btnCompUiUnins').onclick = () => confirmDialog({
   html: '将移除 <b>CampusNetAuthUI.vbs</b> 静默启动器。',
   okText: '确认卸载',
   onOk: () => compOp('uninstall', 'ui', $('#btnCompUiUnins'))
+});
+// 彻底卸载：打开同目录的独立卸载器（它自己的窗口里再确认一次）。
+// ⚠️ 必须是独立 exe：Windows 下运行中的主 exe 删不掉自己；卸载器会连本界面
+// 进程一起收掉，所以这里只负责把它拉起来，不做任何"先删点什么"的动作。
+$('#btnPurge').onclick = () => confirmDialog({
+  title: '彻底卸载本程序',
+  html: '将打开 <b>CampusNetAuthUninstall.exe</b>：<br>'
+      + '停止后台守护 → 删除开机自启项 → 清空本目录的程序文件、日志与缓存。<br><br>'
+      + '它<b>只删本程序自己的文件</b>（目录里你自己的文件会保留，目录也会保留）。<br>'
+      + '确认后请在弹出的卸载窗口里再次确认。',
+  okText: '打开卸载程序',
+  onOk: async () => {
+    try{
+      const r = await post('/api/uninstall', {});
+      toast((r && r.ok) ? (r.message || '卸载程序已启动')
+                        : ('启动失败：' + ((r && r.error) || '未知原因')), 5000);
+    }catch(e){ toast('出错：' + e, 3600); }
+  }
 });
 $('#deployBannerClose').onclick = () => { deployBannerDone = true; $('#deployBanner').style.display = 'none'; };
 $('#btnSaveAuto').onclick = async () => {

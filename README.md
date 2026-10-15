@@ -93,6 +93,7 @@
 | `log [-n N]` | 打印最近 N 行日志（UTF-8 读取，不乱码） |
 | `test` | 自检：RSA、门户连通、登录页获取 |
 | `upgrade` | 就地升级到程序目录里的新版本并重启守护；`--check` 只体检不改动 |
+| `uninstaller` | 打开（必要时先释放）内置的彻底卸载程序 `CampusNetAuthUninstall.exe` |
 
 ## 管理界面
 
@@ -106,7 +107,7 @@ HTML 现代 Web 风格（本地 HTTP 服务 + 原生 Edge WebView2 窗口，单�
 | 分页 | 可设置 |
 |---|---|
 | **连接与账号** | 门户地址、运营商（校园网/电信/移动/联通/自动）、账号、密码，立即连接或下线 |
-| **自动化** | 开机自动认证开关；守护进程管理（状态与 PID、启停/重启）；组件管理（三组件按需装/卸，卸载有确认对话框）；检测周期、重试间隔、退避上限、超时；工具箱（自检 / 一键体检 / 打开目录 / 抓取诊断 / 通知测试） |
+| **自动化** | 开机自动认证开关；守护进程管理（状态与 PID、启停/重启）；组件管理（三组件按需装/卸，卸载有确认对话框；另有「彻底卸载」入口）；检测周期、重试间隔、退避上限、超时；工具箱（自检 / 一键体检 / 打开目录 / 抓取诊断 / 通知测试） |
 | **状态与日志** | 实时网络状态、账号、服务、IP、自启与守护状态，刷新 / 立即检测 / 下线，深色终端风格日志区 |
 
 细节约定：
@@ -117,6 +118,36 @@ HTML 现代 Web 风格（本地 HTTP 服务 + 原生 Edge WebView2 窗口，单�
 - **单文件便携 + 组件按需安装**：交付物只有 `CampusNetAuth.exe`，在「自动化 → 组件管理」点击安装才释放对应文件（自启组件放 `CampusNetAuthDaemon.vbs` 并写 Run 键；值守组件释放同一 vbs 启动器，不再复制 exe 副本；界面启动器组件放 `CampusNetAuthUI.vbs`）。全新部署且目录非空时提醒一次"建议放入空文件夹"。
 - 所有配置文件放在 exe 所在目录（`config.json` / `cred.bin` / `state.json` / `daemon.pid` / `campusnet.log`），整个文件夹拷走即迁移。
 - 首次启动约 10~15 秒（onefile 解压 + WebView2 初始化），二次启动更快；需要 Edge WebView2 运行时（Windows 10/11 自带）。
+
+## 彻底卸载
+
+`CampusNetAuth.exe` 是单文件便携程序，**"删掉 exe"并不等于卸载干净**：守护进程、
+开机自启注册表项、解包缓存都还在。更麻烦的是 Windows 的硬规矩——**正在运行的
+exe 无法删除自己**（文件被映像段锁住），所以彻底卸载必须由**另一个 exe**来完成。
+
+因此 exe 里内置了一个约 20KB 的独立卸载程序，**你第一次打开主程序时它会自动释放到
+同目录**（`CampusNetAuthUninstall.exe`），也可以在界面「自动化 → 组件管理 → 彻底卸载」
+点一下打开，或命令行 `CampusNetAuth.exe uninstaller`。
+
+它做的事（有确认窗口，也可以 `--silent` 静默跑）：
+
+| 步骤 | 内容 |
+|---|---|
+| 1 | 终止**本目录下**的全部本程序进程（含 onefile 的引导父进程——它持有 exe 文件句柄，不杀掉就删不动文件，这正是"卸载删不掉"的根因） |
+| 2 | 删除 `HKCU\...\Run\CampusNetAuth` 自启项 —— 仅当它指向本目录或已失效；指向另一份安装时保留 |
+| 3 | 清理 `%TEMP%` 下属于本程序的 `_MEI*` 解包残留 —— **正在被使用的（另一个实例还在跑）整体跳过，一个文件都不动** |
+| 4 | 删除程序文件、日志与轮转、状态/凭据、`.webview2-cache`、`probe` 等全部产物 |
+| 5 | 目录里若有你自己的文件，**目录保留**（只删本程序的东西）；最后把自己也删掉 |
+
+```bat
+CampusNetAuthUninstall.exe              图形确认后彻底卸载
+CampusNetAuthUninstall.exe --silent     静默（退出码 0=干净 / 1=有残留）
+CampusNetAuthUninstall.exe --keep-data  保留账号配置与凭据（config/cred/state）
+CampusNetAuthUninstall.exe --report=C:\unins.txt   写出清理明细（排障/取证用）
+```
+
+> 进程判定一律按**映像文件全路径**，绝不按进程名杀——同名多份部署很常见，
+> 按名字杀会误伤你放在别处的另一份程序。
 
 ## 配置文件 `config.json`
 
@@ -267,6 +298,17 @@ check_online() = False ?  ──否──→ 正常在线，进入常规周期
 > 组件（`CampusNetAuthDaemon.vbs` / `CampusNetAuthUI.vbs`）**不需要重装**——
 > 它们只是启动器，内容没变，也不携带版本。
 
+> **"守护关了却删不掉文件"？** 那是 onefile 的**引导父进程**还活着（子进程被停掉，
+> 父进程仍在等它并持有 exe 文件句柄）。v0.5.2 起 `stop_daemon` 会按 `daemon.pid`
+> 记录的「自身 PID + 父进程 PID」连同端口占用者一起收尾，并且**停机没干净时保留
+> `daemon.pid`**（它是下次找到残留进程的唯一线索）。要彻底清干净，直接用
+> [彻底卸载](#彻底卸载) 里的内置卸载器——它按**映像文件全路径**认领进程，不误伤别处
+> 的另一份部署。
+
+> 卸载器同样随主程序升级：每次打开界面时按大小比对，发现旧的就刷新同目录的
+> `CampusNetAuthUninstall.exe`；它不携带版本资源，因此绝不会被"发现新版本"逻辑
+> 误当成升级候选。
+
 ### 推荐升级方式（v0.5 起）
 
 1. 从 Release 下载新的 exe，**放进程序所在文件夹**（与旧版同名时 Windows 会自动
@@ -294,6 +336,8 @@ campus-net-auth/
 ├─ CampusNetAuth.exe        主程序（单 exe，双击=界面 / daemon 参数=守护 / CLI 子命令）
 ├─ CampusNetAuthUI.vbs      静默启动界面脚本（无黑窗，「界面启动器组件」释放）
 ├─ CampusNetAuthDaemon.vbs  守护静默启动器（无黑窗，「值守/自启组件」释放）
+├─ CampusNetAuthUninstall.exe  彻底卸载程序（约 20KB 的独立 exe，内置于主 exe，
+│                              首次打开界面自动释放到同目录；删不掉自己是 Windows 的硬规矩）
 ├─ campusnet.py             主程序源码（开发态用，零依赖）
 ├─ desktop.py               HTML 界面桌面壳（pywebview + Edge WebView2，优先启动）
 ├─ gui_server.py            HTML 界面后端（零第三方依赖 HTTP 服务 + 内嵌前端）
@@ -301,7 +345,11 @@ campus-net-auth/
 ├─ e2e_test.py              端到端测试脚本
 ├─ dump_online_info.py      门户在线信息抓取诊断（排障用，只读不写）
 ├─ check_ui.py              内嵌前端静态校验（JS 语法 / 标签配对 / id 引用）
-├─ smoke_regression.py      冒烟回归（离线，覆盖核心链路）
+├─ smoke_regression.py      冒烟回归（离线，覆盖核心链路；含内置卸载器自动释放）
+├─ smoke_uninstall.py       内置卸载器端到端（隔离目录伪造"用过的程序目录"+ 占用
+│                           exe 的进程 + 另一个正在运行的实例，断言清得干净且不误伤）
+├─ uninstaller/CampusNetAuthUninstall.cs  彻底卸载程序源码（C# WinForms）
+├─ build_uninstaller.bat    编译卸载器（系统自带的 csc.exe，输出 build_assets/）
 ├─ config.json              配置（不含密码，自动生成）
 ├─ config.example.json      配置模板（发布仓库用，账号为占位符）
 ├─ cred.bin                 DPAPI 加密的密码（自动生成）
@@ -311,7 +359,7 @@ campus-net-auth/
 ├─ build_exe.bat            一键重新打包（--onefile --windowed）
 ├─ _pyinst_wrap.py          打包包装（绕过 sitecustomize shim + 生成版本资源）
 ├─ tests/                   单元测试（零网络，CI 跑）
-├─ .github/workflows/       CI（windows-latest：语法 + 单测 + 前端 JS 检查）
+├─ .github/workflows/       CI（windows-latest：语法 + 编译卸载器 + 卸载器端到端 + 单测 + 前端 JS 检查）
 └─ probe/                   抓包诊断运行输出（capture_result.json 等，自动生成）
 ```
 
@@ -326,6 +374,14 @@ campus-net-auth/
 双击 **`build_exe.bat`** 一键重建。内部 `python -E -S _pyinst_wrap.py` 启动
 PyInstaller，产物在 `dist\CampusNetAuth.exe`（fresh build），随后复制到项目根。
 exe 版本资源由 `_pyinst_wrap.py` 从 `campusnet.py` 的 `APP_VERSION` 自动生成。
+
+`build_exe.bat` 会先调用 **`build_uninstaller.bat`** 编译内置卸载器
+（`uninstaller\CampusNetAuthUninstall.cs` → `build_assets\CampusNetAuthUninstall.exe`），
+再用 `--add-data` 把它和两个 vbs 一起塞进主 exe。卸载器刻意用 **C# + .NET
+Framework** 而不是 PyInstaller 再打一个包：只有约 20KB（要塞进主 exe，每 MB 都翻倍
+在下载体积上）、**自己不解压就不留 `_MEI` 残留**、且 `csc.exe` 是 Windows 10/11 与
+CI 运行器自带的，用户侧无需任何额外运行时。编译不通过时构建直接失败，不会产出
+"缺卸载器"的 exe。`CNA_CSC` 可覆盖编译器路径。
 
 `_pyinst_wrap.py` 的存在原因：本项目的开发环境（WorkBuddy）会在 `sitecustomize`
 中劫持 `os.remove` 到回收站 API，导致 PyInstaller `--clean` 阶段失败但静默退出
@@ -375,6 +431,10 @@ CLI 从 cmd 运行时通过 `AttachConsole` 附加父控制台并按代码页输
 | 升级后新功能没生效 | 换完文件时仍在跑的守护还是旧版本代码。v0.5 起界面会自动重启陈旧守护（也有「重启守护以生效」按钮）；更早版本请手动重启守护 |
 | 后台守护显示"← 旧版" | 版本握手发现守护进程与程序文件版本不一致，点「重启守护以生效」即可 |
 | 程序目录里的 `CampusNetAuth.exe.old.exe` | 就地升级留下的旧版本备份，下次启动自动清理；也可手动删（需先退出程序） |
+| 守护明明"停了"，exe 却还是删不掉（`WinError 32`） | onefile 的**引导父进程**还在（它持有 exe 文件句柄等待子进程收尾）。用内置卸载器清理：界面「组件管理 → 彻底卸载」或 `CampusNetAuthUninstall.exe`；它会把整个进程族（含该父进程）收掉再删文件 |
+| 想彻底卸载、一点残留都不留 | 运行程序目录里的 `CampusNetAuthUninstall.exe`（首次打开主程序时自动释放；也可 `CampusNetAuth.exe uninstaller`）。它会停守护、删自启项、清 `%TEMP%` 解包残留、删程序文件与缓存，最后把自己删掉；目录里你自己的文件与目录本身会保留 |
+| 卸载后想保留账号配置 | `CampusNetAuthUninstall.exe --keep-data`（保留 `config.json` / `cred.bin` / `state.json`，下次安装免重填） |
+| 卸载报告说"有残留" | 看报告（`--report=<路径>`）里的失败项；常见原因是某进程被权限/杀软拦住未终止，或某文件被别的程序占用。卸载器也会把"另一个正在运行的实例仍占用的解包目录"列为**保留**（不是失败），属预期 |
 | 想换地方存放 | 整个文件夹一起移动（配置都在 exe 旁边），移动后打开一次界面即可：自启路径会自动修正为新位置 |
 | 直接删掉程序文件夹，注册表里还留着自启项 | 无碍：Run 键命令带 `//B`，启动器不存在时开机会静默跳过（不弹任何报错）。想清掉可在 Windows「设置 → 应用 → 启动」里把 CampusNetAuth 关掉/删除，或把程序放回原路径再打开界面（自愈会接回） |
 | 双击 exe 闪黑色 cmd 窗口 | 不应发生（`--windowed` 打包）。如仍闪，检查是否被 `cmd /c start` 或 bat 间接拉起 |
