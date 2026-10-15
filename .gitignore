@@ -35,6 +35,8 @@ _verify_api.py
 _verify_uninstall_exe.py
 # 跑完会动自启项/守护的脚本之后，用它把用户真实部署恢复原状
 _restore_deploy.py
+# 交付前终检（产物/用户环境/测试残留）
+_final_check.py
 e2e_result.txt
 HANDOVER.md
 
