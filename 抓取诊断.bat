@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 title CampusNetAuth - Portal Watcher
 
-rem NOTE: keep this file pure ASCII on purpose (see 管理界面.bat header).
+rem NOTE: keep this file pure ASCII on purpose (see the GUI launcher bat header).
 rem Runs diagnose_probe.py: watches the portal until YOU finish a manual
 rem login, then writes probe\capture_result.json + capture_report.txt.
 rem (The UI "Capture diagnostic" button uses "CampusNetAuth.exe diagnose".)
