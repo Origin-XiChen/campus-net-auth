@@ -5,6 +5,11 @@ on: [push, pull_request]
 jobs:
   unit:
     runs-on: windows-latest
+    env:
+      # 运行器控制台默认 cp1252：不设这个，凡是有中文输出的 Python 步骤都可能
+      # UnicodeEncodeError 直接失败（本项目已经踩过一次）。
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

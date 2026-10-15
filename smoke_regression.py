@@ -7,6 +7,14 @@
 import os
 import re
 import sys
+
+# ⚠️ 控制台若为非 UTF-8 代码页（例如 CI 的 cp1252），print 中文会 UnicodeEncodeError；
+# 强制 UTF-8 输出 + 无法编码字符降级，保证"打印"永远不会让测试脚本崩掉。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
 import ast
 import json
 import time

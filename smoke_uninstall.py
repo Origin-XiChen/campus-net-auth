@@ -22,6 +22,15 @@ import shutil
 import subprocess
 import tempfile
 
+# ⚠️ 本脚本要能在 CI（GitHub Windows 运行器）里跑：那里的控制台是 cp1252，
+# 直接 print 中文会 UnicodeEncodeError 直接崩（本仓库在 CI 上真踩过）。
+# 这里强制 UTF-8 输出，无法编码的字符降级为 ?，绝不因为"打印"而失败。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001  (老 Python / 非标准流)
+        pass
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 UNINST = os.path.join(ROOT, "build_assets", "CampusNetAuthUninstall.exe")
 DIST_EXE = os.path.join(ROOT, "dist", "CampusNetAuth.exe")
