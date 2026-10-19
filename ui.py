@@ -1553,11 +1553,13 @@ class App(tk.Tk):
         cfg = cn.load_config()
         client = cn.PortalClient(cfg)
         online, _ = client.check_online()
+        portal = client.portal_reachable() if online is None else None
         info = None
-        if online:
+        if online or portal:
             info = client.interface("getOnlineUserInfo")
         return {
             "online": online,
+            "portal": portal,
             "info": info if isinstance(info, dict) else {},
             "autostart": cn.autostart_status(),
             "daemon": cn.daemon_running(),
@@ -1573,7 +1575,8 @@ class App(tk.Tk):
             self.state_var.set("已连接")
             self.state_dot.set_color(GREEN)
         elif online is None:
-            self.state_var.set("网络不可达")
+            # 探测无结论 ≠ 网络不可达：门户可达时如实说明（issue #1 的误导来源）
+            self.state_var.set("待确认" if st.get("portal") else "不在校园网")
             self.state_dot.set_color(ORANGE)
         else:
             self.state_var.set("未认证")
@@ -1582,7 +1585,7 @@ class App(tk.Tk):
         svc = info.get("service") or st["service"] or "—"
         self.stat_vars["network"].set(
             {True: "已认证", False: "未认证",
-             None: "不可达"}[online])
+             None: ("待确认" if st.get("portal") else "不可达")}[online])
         self.stat_vars["account"].set(
             cn.mask_user(st["username"]) or "—")
         self.stat_vars["service"].set(svc)

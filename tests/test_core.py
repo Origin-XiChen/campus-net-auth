@@ -145,6 +145,35 @@ class TestEncodingHelpers(unittest.TestCase):
         self.assertEqual(fields["userId"], "")
 
 
+class TestNetworkStateText(unittest.TestCase):
+    """状态文案必须区分"公网探测无结论"与"网络不可达"。
+
+    check_online() 的 None 只说明探测无结论（未认证时 DNS 被挡就很常见），
+    不等于门户不可达；旧文案一律写成"网络不可达"，正是 issue #1 的误报来源。
+    """
+
+    def test_known_states(self):
+        self.assertEqual(cn.network_state_text(True, None), "已认证/可上网")
+        self.assertEqual(cn.network_state_text(False, None), "未认证（被门户劫持）")
+
+    def test_inconclusive_with_reachable_portal_is_not_offline(self):
+        text = cn.network_state_text(None, True)
+        self.assertIn("无结论", text)
+        self.assertIn("门户可达", text)
+        self.assertNotIn("不可达", text)
+
+    def test_inconclusive_with_unreachable_portal(self):
+        text = cn.network_state_text(None, False)
+        self.assertIn("不可达", text)
+        self.assertNotIn("门户可达", text)
+
+    def test_inconclusive_without_portal_probe_stays_neutral(self):
+        text = cn.network_state_text(None, None)
+        self.assertIn("无结论", text)
+        self.assertNotIn("不可达", text)
+        self.assertNotIn("不在校园网", text)
+
+
 class TestCookieJar(unittest.TestCase):
     def test_roundtrip_and_delete(self):
         jar = cn.CookieJar()

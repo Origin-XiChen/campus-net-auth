@@ -126,7 +126,9 @@ _MEI_CLEANED = _cleanup_stale_mei()
 
 # 应用版本（单一来源）：CLI --version、构建的 exe 版本资源、发布说明均以此为准
 # 0.5.2 = 内置彻底卸载器（随界面自动释放）+ 守护停机/进程归属硬化
-APP_VERSION = "0.5.2"
+# 0.5.3 = 公网探测无结论时的认证阻塞与退避修复（PR#3）+ 登录页发现优先重定向（PR#2）
+#         + 状态文案不再把"探测无结论"误报成"网络不可达"
+APP_VERSION = "0.5.3"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1124,11 +1126,36 @@ def clear_session():
 EVENT_LABEL = {
     "lost": "掉线重连",
     "restored": "恢复在线",
-    "offline": "网络不可达",
+    # "offline" 现在同时覆盖"真不在校园网"与"公网探测无结论"两种情形，
+    # 这里用中性词；具体原因由事件自带的 msg 说明。
+    "offline": "网络异常",
     "login_ok": "认证成功",
     "login_fail": "认证失败",
     "kickout": "会话失效",
 }
+
+
+def network_state_text(online, portal=None):
+    """把 (公网探测结果, 门户可达性) 翻成不误导的状态文案。
+
+    ⚠️ check_online() 的 None 只是"公网探测没有任何结论"（例如未认证时 DNS
+    被挡、三个探测目标全部传输层失败），**不等于"网络不可达"**：校园门户是
+    裸 IP，此时往往仍然可达。旧文案把 None 一律写成"网络不可达"，Issue #1
+    里那句反复出现的误报就是它；而 issue 报告者实际能手动认证成功，也说明
+    门户是好的。
+
+    portal 为 None 表示"没有探测门户可达性"（只给出保守措辞）。
+    文案为单一事实来源，供 cmd_status / cmd_test / 界面状态卡复用。
+    """
+    if online is True:
+        return "已认证/可上网"
+    if online is False:
+        return "未认证（被门户劫持）"
+    if portal is True:
+        return "公网探测无结论（门户可达）"
+    if portal is False:
+        return "不在校园网（门户不可达）"
+    return "公网探测无结论"
 
 
 def record_event(kind, msg):
@@ -3332,12 +3359,12 @@ def cmd_status(args):
     cfg = load_config()
     client = PortalClient(cfg)
     online, loc = client.check_online()
+    # 探测无结论时补一句门户可达性：否则会把"探测不到公网"误报成"网络不可达"
+    portal = client.portal_reachable() if online is None else None
     print("门户地址 : %s" % client.url(""))
     print("账号     : %s" % (cfg.get("username") or "(未配置)"))
     print("服务     : %s" % cfg.get("service"))
-    print("网络状态 : %s" % {True: "已认证/可上网",
-                             False: "未认证（被门户劫持）",
-                             None: "网络不可达"}[online])
+    print("网络状态 : %s" % network_state_text(online, portal))
     print("开机自启 : %s" % ("已启用" if autostart_status() else "未启用"))
     print("守护进程 : %s" % (
         "运行中(PID=%s)" % daemon_pid() if daemon_running() else "已停止"))
@@ -3656,8 +3683,10 @@ def cmd_test(args):
         print("门户连通    : 失败 (HTTP %s)" % r.status)
 
     online, loc = client.check_online()
-    print("当前状态    : %s" % {True: "已在线", False: "未认证",
-                                None: "网络不可达"}[online])
+    # 无结论时用上面那次门户连通探测的结果（第 2 步刚测过，不重复发请求）
+    print("当前状态    : %s" % (
+        {True: "已在线", False: "未认证"}[online] if online is not None
+        else network_state_text(None, portal=(r.status > 0))))
 
     # 3. 登录页可用性（未认证时才有意义）
     if online is False:

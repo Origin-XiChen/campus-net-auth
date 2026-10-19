@@ -64,22 +64,36 @@ def set_main_hwnd(hwnd: int) -> None:
 # 状态轮询探测缓存：/api/status 每 20s 轮询一次，而网络探测（连通性 +
 # 在线信息）要发最多 4 个 HTTP。缓存 _PROBE_TTL 秒内复用结果，网络差时
 # 轮询不会被 HTTP 超时拖成"一直读取状态"；手动「立即检测」不走此缓存。
-_PROBE_CACHE = {"t": 0.0, "online": None, "info": {}}
+# portal：公网探测无结论时"门户本身是否可达"，用来区分"不在校园网"与
+# "只是探测不到公网"（后者门户往往可达，旧文案一律说"网络不可达"是误导）。
+_PROBE_CACHE = {"t": 0.0, "online": None, "info": {}, "portal": None}
 _PROBE_TTL = 5.0
 
 
 def _probe_network(cfg) -> tuple:
+    """返回 (online, info, portal)。"""
     now = time.time()
     if (now - _PROBE_CACHE["t"] < _PROBE_TTL
             and _PROBE_CACHE["online"] is not None):
-        return _PROBE_CACHE["online"], _PROBE_CACHE["info"]
+        return (_PROBE_CACHE["online"], _PROBE_CACHE["info"],
+                _PROBE_CACHE["portal"])
     client = cn.PortalClient(cfg)
     online, _loc = client.check_online()
-    info = client.interface("getOnlineUserInfo") if online else None
+    portal = None
+    if online is None:
+        # 公网探测无结论：追问一句门户可达性 + 门户侧会话信息，供状态卡显示。
+        portal = client.portal_reachable()
+        if portal:
+            info = client.interface("getOnlineUserInfo")
+        else:
+            info = None
+    else:
+        info = client.interface("getOnlineUserInfo") if online else None
     if not isinstance(info, dict):
         info = {}
-    _PROBE_CACHE.update({"t": now, "online": online, "info": info})
-    return online, info
+    _PROBE_CACHE.update({"t": now, "online": online, "info": info,
+                         "portal": portal})
+    return online, info, portal
 
 
 def _wake_daemon() -> None:
@@ -97,7 +111,7 @@ def _wake_daemon() -> None:
 
 def _status_payload() -> dict:
     cfg = cn.load_config()
-    online, info = _probe_network(cfg)
+    online, info, portal = _probe_network(cfg)
     # 空文件夹提醒只出现一次：先取本会话的"无关文件"快照，再落盘部署标记
     # （state.json），第二次启动起 first_deploy() 为 False → 不再提醒。
     foreign = cn.foreign_files()
@@ -106,6 +120,11 @@ def _status_payload() -> dict:
     dc = _daemon_check()      # 纯内存读；重算在后台线程/renew 端点里做
     return {
         "online": online,
+        # 门户可达性（仅公网探测无结论时有值）与统一文案：
+        # 前端按 online 上图色、按 net_text 出文字，避免"探测无结论"被误报成
+        # "网络不可达"（issue #1 的误导来源）。
+        "portal": portal,
+        "net_text": cn.network_state_text(online, portal),
         "info": info,
         "autostart": cn.autostart_status(),
         # 自启链路健康检查：Run 键 → 启动器 → exe 文件完整性（缺失时前端红色警示）
@@ -348,10 +367,16 @@ def _task_health() -> str:
     rc = cn.cmd_logout(_A())
     lines.append("下线命令返回码=%s" % rc)
     ok = False
+    client = cn.PortalClient(cn.load_config())
     for i in range(75):
         time.sleep(1)
-        cfg = cn.load_config()
-        online, _ = cn.PortalClient(cfg).check_online()
+        online, _ = client.check_online()
+        if online is None:
+            # 公网探测无结论（如未认证时 DNS 被挡）时，门户侧有在线会话同样
+            # 说明守护已重连成功——否则体检会在这种环境里误报"未自动重连"。
+            _i = client.interface("getOnlineUserInfo")
+            if isinstance(_i, dict) and _i.get("userIndex"):
+                online = True
         if online:
             lines.append("第 %d 秒：守护已自动重连成功 ✓" % (i + 1))
             ok = True
@@ -1425,11 +1450,15 @@ async function load(){
   const netTxt = $('#stateText');
   netTxt.className = '';
   if (online === true){ netTxt.textContent = '已连接'; dot.classList.add('green'); netTxt.classList.add('ok'); }
-  else if (online === null){ netTxt.textContent = '网络不可达'; dot.classList.add('orange'); netTxt.classList.add('warn'); }
+  else if (online === null){
+    /* 探测无结论 ≠ 网络不可达：门户可达时如实说明，避免误报（issue #1） */
+    netTxt.textContent = st.net_text || (st.portal ? '门户可达 · 探测无结论' : '不在校园网');
+    dot.classList.add('orange'); netTxt.classList.add('warn'); }
   else { netTxt.textContent = '未认证'; dot.classList.add('red'); netTxt.classList.add('err'); }
 
   $('#subtitle').textContent = '门户 ' + st.host + ' · 检测周期 ' + st.interval + ' 秒';
-  const netMap = {true:['已认证','ok'], false:['未认证','err'], null:['不可达','warn']};
+  const netMap = {true:['已认证','ok'], false:['未认证','err'],
+                  null:[(st.portal ? '待确认' : '不可达'),'warn']};
   const nm = netMap[online] || ['—',''];
   const stNetEl = $('#stNet');
   stNetEl.textContent = nm[0];
