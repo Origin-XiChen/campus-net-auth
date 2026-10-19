@@ -746,51 +746,65 @@ class PortalClient:
         未认证时，访问任意外网会被网关重定向到 portal 登录页，
         该 URL 的 query 即为后续登录所需的 queryString。
         """
-        candidates = []
-
         online, location = self.check_online()
         if online:
             return None, None
-        if location:
-            candidates.append(location)
-
-        # 兜底：直接请求门户（不跟随重定向）
-        for p in ("/", self.base + "/index.jsp", self.base + "/"):
-            r = http_request("GET", self.host, self.port, p,
-                             timeout=self.timeout, cookie_jar=self.cookies)
-            if r.status in (301, 302, 303, 307, 308):
-                loc = r.get("Location")
-                if loc:
-                    candidates.append(urllib.parse.urljoin(self.url("/"), loc))
-            elif r.status == 200:
-                txt = r.text()
-                if "publicKeyExponent" in txt or "passwordEncrypt" in txt:
-                    candidates.append(self.url(p))
-                else:
-                    m = re.search(r'(?:location|href)\s*=\s*["\']([^"\']+)["\']',
-                                  txt, re.I)
-                    if m:
-                        candidates.append(urllib.parse.urljoin(self.url("/"),
-                                                               m.group(1)))
 
         seen = set()
-        for url in candidates:
-            if url in seen:
-                continue
-            seen.add(url)
-            parsed = urllib.parse.urlparse(url)
-            if not parsed.netloc:
-                continue
-            port = parsed.port or 80
+
+        def read_page(candidate, response=None, base_url=None):
+            try:
+                parsed = urllib.parse.urlparse(
+                    urllib.parse.urljoin(base_url or self.url("/"), candidate))
+                if (parsed.scheme != "http"
+                        or parsed.hostname != self.host.lower()
+                        or (parsed.port or 80) != self.port
+                        or parsed.username is not None
+                        or parsed.password is not None):
+                    return None, None
+            except (TypeError, ValueError):
+                return None, None
             path = parsed.path or "/"
             if parsed.query:
                 path += "?" + parsed.query
-            r = http_request("GET", parsed.hostname, port, path,
-                             timeout=self.timeout, cookie_jar=self.cookies)
-            if r.status == 200:
-                html = r.text()
+            url = self.url(path)
+            if url in seen:
+                return None, None
+            seen.add(url)
+            if response is None:
+                response = http_request("GET", self.host, self.port, path,
+                                        timeout=self.timeout, cookie_jar=self.cookies)
+            if response.status == 200:
+                html = response.text()
                 if "publicKeyExponent" in html or "pwd" in html:
                     return url, html
+            return None, None
+
+        if location:
+            page = read_page(location)
+            if page[1]:
+                return page
+
+        for p in ("/", self.base + "/index.jsp", self.base + "/"):
+            if self.url(p) in seen:
+                continue
+            r = http_request("GET", self.host, self.port, p,
+                             timeout=self.timeout, cookie_jar=self.cookies)
+            page = read_page(self.url(p), r)
+            if page[1]:
+                return page
+            loc = None
+            if r.status in (301, 302, 303, 307, 308):
+                loc = r.get("Location")
+            elif r.status == 200:
+                match = re.search(r'(?:location|href)\s*=\s*["\']([^"\']+)["\']',
+                                  r.text(), re.I)
+                if match:
+                    loc = match.group(1)
+            if loc:
+                page = read_page(loc, base_url=self.url(p))
+                if page[1]:
+                    return page
         return None, None
 
     # ---------- 登录 ----------
