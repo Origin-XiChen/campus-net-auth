@@ -361,8 +361,12 @@ def main():
               "uninstaller",
               # 守护版本体检（升级自愈）：界面据这些字段提示/自动重启陈旧守护
               "daemon_version", "daemon_stale", "daemon_stale_reason",
-              "upgrade", "app_version"):
+              "upgrade", "app_version",
+              # 状态文案与门户可达性：区分"公网探测无结论"与"网络不可达"
+              "portal", "net_text"):
         check("status 字段 %s" % k, k in st, "" if k in st else "缺失")
+    check("net_text 非空字符串", isinstance(st.get("net_text"), str)
+          and bool(st.get("net_text")), "net_text=%r" % st.get("net_text"))
     rec("  [信息] components=%s autostart=%s daemon=%s" %
         (st.get("components"), st.get("autostart"), st.get("daemon")))
     check("app_version 与 exe 版本一致", st.get("app_version") == APP_VER,
