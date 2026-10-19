@@ -663,7 +663,7 @@ class PortalClient:
         返回 (online, location)
           online=True  : 已能上外网
           online=False : 被门户劫持，location 为登录页 URL
-          online=None  : 网络不通（不在校园网 / 网卡未连接）
+          online=None  : 公网探测无结论，不代表校园网门户不可达
         """
         targets = self.cfg.get("detect_targets") or []
         any_connected = False
@@ -740,15 +740,16 @@ class PortalClient:
         return self.interface("keepalive", {"userIndex": ui})
 
     # ---------- 登录页发现 ----------
-    def discover_login_page(self):
+    def discover_login_page(self, detection=None):
         """
         找到真正的登录页 URL 并返回 (url, html)。
         未认证时，访问任意外网会被网关重定向到 portal 登录页，
         该 URL 的 query 即为后续登录所需的 queryString。
+        detection 只复用本次探测结果，避免同一尝试再次探测。
         """
         candidates = []
 
-        online, location = self.check_online()
+        online, location = self.check_online() if detection is None else detection
         if online:
             return None, None
         if location:
@@ -793,9 +794,40 @@ class PortalClient:
                     return url, html
         return None, None
 
+    def check_authentication(self):
+        """返回 (online, 本轮登录页上下文)，仅在公网探测未知时复核门户。"""
+        online, location = self.check_online()
+        if online is not None:
+            return online, None
+        info = self.interface("getOnlineUserInfo")
+        if (isinstance(info, dict) and info.get("userIndex")
+                and str(info.get("result", "success")).lower() == "success"):
+            return True, None
+        try:
+            url, html = self.discover_login_page(detection=(online, location))
+            parsed = urllib.parse.urlparse(url)
+            if (not html or not parsed.query
+                    or parsed.scheme != "http"
+                    or parsed.hostname != self.host.lower()
+                    or (parsed.port or 80) != self.port
+                    or parsed.username is not None
+                    or parsed.password is not None):
+                return None, None
+        except (TypeError, ValueError):
+            return None, None
+        fields = parse_inputs(html)
+        encrypt_flag = fields.get("passwordEncrypt", "").lower()
+        if encrypt_flag == "true":
+            if not (fields.get("publicKeyExponent") and fields.get("publicKeyModulus")):
+                return None, None
+        elif encrypt_flag != "false" or "pwd" not in fields:
+            return None, None
+        return False, (url, html)
+
     # ---------- 登录 ----------
-    def login(self, username, password, service_hint=None):
-        url, html = self.discover_login_page()
+    def login(self, username, password, service_hint=None, login_page=None):
+        """login_page 仅复用本次已验证页面，不跨次保存。"""
+        url, html = self.discover_login_page() if login_page is None else login_page
         if not html:
             return {"result": "fail",
                     "message": "未能获取登录页（已在线？或不在校园网环境）"}
@@ -2370,7 +2402,7 @@ def run_daemon(cfg, cred):
             if _data == "CHECK":
                 # UI 手动登录/操作后发来：结束等待，立即进入本轮探测
                 log.info("收到唤醒指令，立即复核网络状态")
-                return None
+                return "CHECK"
             # 空连接 / 未知数据：存活探测或噪声，吞掉并继续等待剩余时间
 
     while True:
@@ -2383,7 +2415,7 @@ def run_daemon(cfg, cred):
             # 校外网络（家里/热点/公共 WiFi）门户不可达，守护静默等待、绝不认证。
             if not portal_ok:
                 if not client.portal_reachable():
-                    wait = min(offline_interval * min(fail_streak, 10),
+                    wait = min(offline_interval * min(fail_streak + 1, 10),
                                max_interval)
                     if fail_streak == 0:
                         log.info("未检测到校园网门户（不在 iHBUT 网络），守护静默等待，"
@@ -2397,8 +2429,11 @@ def run_daemon(cfg, cred):
                     _slept = 0
                     while _slept < wait:
                         _seg = min(recheck_iv, wait - _slept)
-                        if _wait(_seg) == "STOP":
+                        signal = _wait(_seg)
+                        if signal == "STOP":
                             return 0
+                        if signal == "CHECK":
+                            break
                         _slept += _seg
                         if client.portal_reachable():
                             log.info("检测到校园网门户，提前结束退避，立即重连")
@@ -2411,7 +2446,7 @@ def run_daemon(cfg, cred):
                     fail_streak = 0
                     log.info("校园网门户已恢复，重置检测退避，立即重试")
 
-            online, location = client.check_online()
+            online, login_page = client.check_authentication()
             # ---- 状态事件上浮：仅在状态翻转时记录（首轮不产生假事件）----
             if online != prev_online:
                 if online is True and prev_online is False:
@@ -2419,7 +2454,7 @@ def run_daemon(cfg, cred):
                 elif online is False and prev_online is True:
                     record_event("lost", "检测到未认证，正在自动重连…")
                 elif online is None and prev_online is not None:
-                    record_event("offline", "网络不可达，等待联网…")
+                    record_event("offline", "公网探测无结论，等待复核门户状态…")
                 prev_online = online
             if online:
                 if fail_streak:
@@ -2471,15 +2506,15 @@ def run_daemon(cfg, cred):
                 continue
 
             if online is None:
-                # 网络完全不可达：可能不在校园网 / 未连 WiFi。
-                # 重置"已确认在校园网"标记，下一轮重新探测门户归属。
-                portal_ok = False
-                wait = min(offline_interval * min(fail_streak, 10),
+                portal_ok = client.portal_reachable()
+                wait = min(offline_interval * min(fail_streak + 1, 10),
                            max_interval)
                 if fail_streak == 0:
-                    log.info("网络不可达（可能不在校园网环境），等待联网…")
+                    log.info("公网探测无结论，%s，等待重试…",
+                             "门户可达但页面不满足认证条件" if portal_ok
+                             else "校园网门户不可达")
                 elif fail_streak % 10 == 1:
-                    log.info("网络仍不可达：已连续 %d 次，退避等待 %ss",
+                    log.info("公网探测仍无结论：已连续 %d 次，退避等待 %ss",
                              fail_streak, wait)
                 fail_streak += 1
                 # 退避等待分段快探：每 recheck_iv 秒复核一次外网连通性，
@@ -2487,16 +2522,19 @@ def run_daemon(cfg, cred):
                 _slept = 0
                 while _slept < wait:
                     _seg = min(recheck_iv, wait - _slept)
-                    if _wait(_seg) == "STOP":
+                    signal = _wait(_seg)
+                    if signal == "STOP":
                         return 0
+                    if signal == "CHECK":
+                        break
                     _slept += _seg
-                    if client.check_online()[0]:
-                        log.info("网络已恢复，提前结束退避，立即重试")
+                    if client.check_online()[0] is not None:
+                        log.info("公网探测已有结果，提前结束退避，立即复核")
                         break
                 continue
 
             log.info("检测到未认证，开始登录…")
-            res = client.login(username, cred)
+            res = client.login(username, cred, login_page=login_page)
             if res.get("result") == "success":
                 stats["login_ok"] += 1
                 if fail_streak:
@@ -3261,14 +3299,14 @@ def cmd_once(args):
         log.error("尚未配置账号密码")
         return 1
     client = PortalClient(cfg)
-    online, _ = client.check_online()
+    online, login_page = client.check_authentication()
     if online:
         log.info("已在线，无需操作")
         return 0
     if online is None:
-        log.info("网络不可达，跳过")
+        log.info("公网探测无结论，门户页面未满足认证条件，本次跳过")
         return 0
-    res = client.login(cfg["username"], cred)
+    res = client.login(cfg["username"], cred, login_page=login_page)
     if res.get("result") == "success":
         log.info("登录成功")
         return 0
