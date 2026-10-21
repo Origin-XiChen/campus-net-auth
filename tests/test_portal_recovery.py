@@ -315,7 +315,9 @@ class TestAuthenticationStatus(unittest.TestCase):
                 result = self.client.login("dummy-user", "dummy-password",
                                            login_page=(self.url, html))
             self.assertEqual(result["result"], "fail")
-            request.assert_not_called()
+            # 密码没发出去（向 pageInfo 核实加密参数不携带凭据）
+            self.assertFalse([c for c in request.call_args_list
+                              if "method=login" in str(c)])
 
     def test_http_200_without_challenge_never_submits_credentials(self):
         paths = []
