@@ -249,3 +249,41 @@ class TestCryptoFromPageInfo(_StateDirMixin):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCliOutputEncoding(unittest.TestCase):
+    """CLI 的 print 字面量必须是 GBK 可编码的。
+
+    真机踩过：`CampusNetAuth.exe upgrade` 在升级**已成功**之后用 print 输出
+    `✓`（U+2713），Windows 控制台代码页是 GBK 时直接抛 UnicodeEncodeError，
+    用户看到的是 traceback 而不是"升级成功"。这里把 print 字面量扫一遍，
+    防止再引入非 GBK 字符（日志文件走 UTF-8，不受此限）。
+    """
+
+    def test_print_literals_are_gbk_encodable(self):
+        import ast
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        bad = []
+        for name in ("campusnet.py", "gui_server.py", "ui.py",
+                     "desktop.py", "diagnose_probe.py"):
+            path = os.path.join(root, name)
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), path)
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "print"):
+                    for arg in node.args:
+                        for sub in ast.walk(arg):
+                            if (isinstance(sub, ast.Constant)
+                                    and isinstance(sub.value, str)):
+                                try:
+                                    sub.value.encode("gbk")
+                                except UnicodeEncodeError:
+                                    bad.append((name, node.lineno, sub.value))
+        self.assertEqual(bad, [], "这些 print 字面量无法用 GBK 输出：%r" % (bad,))
+
+
+if __name__ == "__main__":
+    unittest.main()

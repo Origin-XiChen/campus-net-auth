@@ -3578,7 +3578,9 @@ def cmd_upgrade(args):
         return 0
 
     ok, msg = apply_upgrade()
-    print(("✓ " if ok else "✗ ") + msg)
+    # 用中文而非 ✓/✗：Windows 控制台代码页是 GBK 时，✓(U+2713) 无法编码，
+    # 会在升级**已成功**之后抛 UnicodeEncodeError 打断输出（0.5.3 实测）
+    print(("升级成功：" if ok else "升级失败：") + msg)
     return 0 if ok else 1
 
 
