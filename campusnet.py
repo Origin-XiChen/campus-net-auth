@@ -25,6 +25,7 @@ import atexit
 import getpass
 import hashlib
 import socket
+import uuid
 import logging
 import argparse
 import shutil
@@ -128,7 +129,7 @@ _MEI_CLEANED = _cleanup_stale_mei()
 # 0.5.2 = 内置彻底卸载器（随界面自动释放）+ 守护停机/进程归属硬化
 # 0.5.3 = 公网探测无结论时的认证阻塞与退避修复（PR#3）+ 登录页发现优先重定向（PR#2）
 #         + 状态文案不再把"探测无结论"误报成"网络不可达"
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -166,6 +167,17 @@ DEFAULT_CONFIG = {
          "expect": "Success"},
         {"host": "www.baidu.com", "path": "/", "expect": ""},
     ],
+    # 登录页兜底参数：未认证时若网关不做 302 劫持（DNS 直接黑洞）、门户根路径
+    # 又不给登录页，就只能按门户登记的"认证设备参数"自己拼出登录页 URL。
+    # 取值：浏览器登录一次，把地址栏 index.jsp? 后面的参数抄过来
+    # （wlanacname / nasip 必须与 SAM+ 里登记的 portal 设备一致，否则门户只会
+    # 回"WEB认证设备未注册"）。wlanuserip / wlanparameter 留空则用本机
+    # 当前 IPv4 与 MAC 自动填充。整项置空 {} 即关闭该兜底。
+    "login_page_hints": {
+        "wlanacname": "logic",
+        "nasip": "10.253.0.17",
+        "url": "",
+    },
     # 门户公钥 pinning（TOFU）：首次成功登录记录 RSA 公钥指纹到 state.json，
     # 之后指纹不一致即拒发凭据，防伪装门户/同 IP 中间人窃密。
     # 学校更换密钥后需删除 state.json 的 portal_pubkey_fp 字段重新锚定。
@@ -625,6 +637,59 @@ def parse_inputs(html):
     return result
 
 
+def looks_like_eportal_login(html):
+    """粗略判定一份 HTML 是否为锐捷 ePortal 的**学生**登录页。
+
+    为什么不能只看“有 pwd 字段”：门户根目录 `/eportal/` 也挂着一份
+    后台管理登录页（form action=./admin.do?method=login，同样有 pwd 与
+    publicKey），误认成登录页后会拿学生密码去提交管理台接口。这里要求
+    页面上真的存在登录表单的输入域，且不是管理台表单。
+    """
+    if not html:
+        return False
+    # 管理台登录表单（/eportal/ 上那份）：form action 指向 admin.do
+    if re.search(r'action\s*=\s*["\'][^"\']*admin\.do', html, re.I):
+        return False
+    if "publickeyexponent" in html.lower():
+        return True
+    return bool(re.search(r'[\s"\']id\s*=\s*["\']pwd["\']', html, re.I))
+
+
+def local_lan_ipv4(host):
+    """本机面向门户的源 IPv4（拼 wlanuserip 用）；拿不到返回 ""。
+
+    UDP connect 不发包，只让内核查路由选源地址；校外/无网时很快失败。"""
+    if not host:
+        return ""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.5)
+        sock.connect((host, 80))
+        ip = sock.getsockname()[0]
+        return ip if ip and not ip.startswith("0.") else ""
+    except (OSError, ValueError):
+        return ""
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def local_mac_text():
+    """本机 MAC（aa-bb-cc-dd-ee-ff 小写带横线，与门户页面同口径）；
+    拿不到真实网卡地址（uuid 退回随机数）时返回 ""。"""
+    try:
+        node = uuid.getnode()
+    except Exception:
+        return ""
+    if (node >> 40) % 2:        # 组播位为 1 → uuid 给的随机数，不是真 MAC
+        return ""
+    return "-".join("%02x" % ((node >> (8 * i)) & 0xff) for i in range(5, -1, -1))
+
+
 # ============================ 门户客户端 ============================
 
 class PortalClient:
@@ -742,6 +807,36 @@ class PortalClient:
         return self.interface("keepalive", {"userIndex": ui})
 
     # ---------- 登录页发现 ----------
+    def login_page_query(self):
+        """按 login_page_hints 与本机地址拼出登录页 queryString。
+
+        锐捷 ePortal 只在请求带了"认证设备参数"时才下发学生登录页：
+        不带参数的 `/eportal/index.jsp` 只会回一句
+        `alert('WEB认证设备未注册…')`，根路径可能只给成功页或管理台。
+        正常流程里这些参数来自网关 302；网关不做劫持时（例如未认证阶段
+        DNS 直接被黑洞），就只能按这里登记的 wlanacname / nasip 自己拼。
+        缺关键参数时返回 ""（不拼、不乱猜）。
+        """
+        hints = self.cfg.get("login_page_hints") or {}
+        if not isinstance(hints, dict):
+            return ""
+        nasip = str(hints.get("nasip") or "").strip()
+        acname = str(hints.get("wlanacname") or "").strip()
+        if not nasip or not acname:
+            return ""
+        ip = (str(hints.get("wlanuserip") or "").strip()
+              or local_lan_ipv4(self.host))
+        if not ip:
+            return ""
+        mac = (str(hints.get("wlanparameter") or "").strip()
+               or local_mac_text())
+        fields = [("wlanuserip", ip), ("wlanacname", acname),
+                  ("nasip", nasip)]
+        if mac:
+            fields.append(("wlanparameter", mac))
+        fields.append(("url", str(hints.get("url") or "")))
+        return urllib.parse.urlencode(fields)
+
     def discover_login_page(self, detection=None):
         """
         找到真正的登录页 URL 并返回 (url, html)。
@@ -779,7 +874,7 @@ class PortalClient:
                                         timeout=self.timeout, cookie_jar=self.cookies)
             if response.status == 200:
                 html = response.text()
-                if "publicKeyExponent" in html or "pwd" in html:
+                if looks_like_eportal_login(html):
                     return url, html
             return None, None
 
@@ -788,11 +883,13 @@ class PortalClient:
             if page[1]:
                 return page
 
+        portal_answered = False
         for p in ("/", self.base + "/index.jsp", self.base + "/"):
             if self.url(p) in seen:
                 continue
             r = http_request("GET", self.host, self.port, p,
                              timeout=self.timeout, cookie_jar=self.cookies)
+            portal_answered = portal_answered or r.status > 0
             page = read_page(self.url(p), r)
             if page[1]:
                 return page
@@ -808,6 +905,30 @@ class PortalClient:
                 page = read_page(loc, base_url=self.url(p))
                 if page[1]:
                     return page
+
+        # ---- 兜底：网关不做 302 劫持时，自己按门户设备参数拼登录页 URL ----
+        # 校外网络门户本来就不可达，这里不再追加请求、也不刷日志。
+        query = self.login_page_query()
+        hints = self.cfg.get("login_page_hints")
+        if query:
+            path = "%s/index.jsp?%s" % (self.base, query)
+            resp = http_request("GET", self.host, self.port, path,
+                                timeout=self.timeout, cookie_jar=self.cookies)
+            page = read_page(self.url(path), resp)
+            if page[1]:
+                return page
+            if resp.status > 0:
+                log.info("登录页兜底无效：按 login_page_hints 拼出的地址没返回"
+                         "登录页（核对 wlanacname / nasip 是否与 SAM+ 登记的"
+                         " portal 设备一致）")
+        elif portal_answered:
+            if isinstance(hints, dict) and hints:
+                log.info("登录页兜底未生效：login_page_hints 缺 nasip /"
+                         " wlanacname（或本机取不到 IPv4）")
+            else:
+                log.info("未找到可用登录页：网关没给出重定向，门户根路径也不给"
+                         "登录页。可把浏览器登录时地址栏 index.jsp? 后面的参数"
+                         "填进 config.json 的 login_page_hints")
         return None, None
 
     def check_authentication(self):
@@ -832,9 +953,10 @@ class PortalClient:
         except (TypeError, ValueError):
             return None, None
         fields = parse_inputs(html)
-        encrypt_flag = fields.get("passwordEncrypt", "").lower()
+        encrypt_flag = str(fields.get("passwordEncrypt", "")).strip().lower()
         if encrypt_flag == "true":
-            if not (fields.get("publicKeyExponent") and fields.get("publicKeyModulus")):
+            if not (fields.get("publicKeyExponent")
+                    and fields.get("publicKeyModulus")):
                 return None, None
         elif encrypt_flag != "false" or "pwd" not in fields:
             return None, None
@@ -851,13 +973,28 @@ class PortalClient:
         parsed = urllib.parse.urlparse(url)
         query_string = parsed.query
         qs_params = urllib.parse.parse_qs(query_string)
-        mac = (qs_params.get("mac") or [""])[0]
+        # 门户页面 login_bch.js 的口径：queryString 里没有 mac 时用 111111111 参与加密
+        # （未认证劫持拿到的 URL 往往只带 wlanparameter，没有 mac）
+        mac = (qs_params.get("mac") or [""])[0] or "111111111"
 
         fields = parse_inputs(html)
         exp = fields.get("publicKeyExponent", "")
         mod = fields.get("publicKeyModulus", "")
         encrypt_flag = fields.get("passwordEncrypt", "false")
         use_encrypt = str(encrypt_flag).lower() == "true"
+
+        # 有些门户（锐捷 ePortal 新版登录页）把 passwordEncrypt / RSA 公钥都留空，
+        # 真值由页面 JS 从 pageInfo 拉下来再填进隐藏域。只看 HTML 会误判成
+        # "不加密"而提交明文密码，这里按页面同样的方式补齐。
+        page_detail = None
+        if not use_encrypt or not (exp and mod):
+            page_detail = self.page_info(query_string)
+            if isinstance(page_detail, dict):
+                p_exp = str(page_detail.get("publicKeyExponent") or "").strip()
+                p_mod = str(page_detail.get("publicKeyModulus") or "").strip()
+                if (str(page_detail.get("passwordEncrypt", "")).lower() == "true"
+                        and p_exp and p_mod):
+                    use_encrypt, exp, mod = True, p_exp, p_mod
 
         # ---- 门户公钥 pinning（TOFU，pin_pubkey 可关）----
         # 威胁模型：门户身份只靠"私网 IP 可达"判定，任何能在该 IP 应答的设备
@@ -894,7 +1031,7 @@ class PortalClient:
         # 服务选择
         service = service_hint or self.cfg.get("service", "default")
         if service == "auto":
-            service = self._auto_service(query_string)
+            service = self._auto_service(query_string, info=page_detail)
 
         if use_encrypt:
             if not (exp and mod):
@@ -952,8 +1089,10 @@ class PortalClient:
                     break
         return res
 
-    def _auto_service(self, query_string=""):
-        info = self.page_info(query_string) or {}
+    def _auto_service(self, query_string="", info=None):
+        info = (self.page_info(query_string) if info is None else info) or {}
+        if not isinstance(info, dict):
+            info = {}
         services = info.get("service") or {}
         for key, val in services.items():
             if isinstance(val, dict) and str(val.get("serviceDefault")) == "true":
@@ -1004,6 +1143,21 @@ def _sanitize_config(cfg):
             json.dumps(DEFAULT_CONFIG["detect_targets"]))
     if not isinstance(cfg.get("portal_host"), str) or not cfg["portal_host"]:
         cfg["portal_host"] = DEFAULT_CONFIG["portal_host"]
+    # 登录页兜底参数：只保留字符串型的已知键，其余丢弃，避免脏配置拼出怪 URL。
+    # 非字典或空字典（含 false / null / {}）→ 关闭兜底；部分给出时按默认值补齐；
+    # wlanuserip / wlanparameter 留空表示"用本机当前地址自动填充"。
+    hints = cfg.get("login_page_hints")
+    if not isinstance(hints, dict) or not hints:
+        cfg["login_page_hints"] = {}
+    else:
+        merged = dict(DEFAULT_CONFIG["login_page_hints"])
+        merged.update({k: v for k, v in hints.items()
+                       if isinstance(v, (str, int, float))})
+        cfg["login_page_hints"] = {
+            k: str(merged.get(k) or "").strip()
+            for k in ("wlanacname", "nasip", "wlanuserip",
+                      "wlanparameter", "url")
+        }
     # 布尔项容错（用户手写 JSON 可能写成字符串 "false"）
     v = cfg.get("pin_pubkey", True)
     cfg["pin_pubkey"] = v if isinstance(v, bool) else True
@@ -3377,6 +3531,13 @@ def cmd_status(args):
         else:
             print("守护版本 : 未知（%s）" % _dd)
     print("凭据文件 : %s" % ("已存在" if os.path.exists(CRED_PATH) else "缺失"))
+    # 登录页兜底：网关不做 302 劫持时靠它自己拼登录页，填错了很难自查
+    hints = cfg.get("login_page_hints") or {}
+    if isinstance(hints, dict) and hints.get("nasip") and hints.get("wlanacname"):
+        print("登录页兜底: 已配置 (wlanacname=%s nasip=%s)"
+              % (hints["wlanacname"], hints["nasip"]))
+    else:
+        print("登录页兜底: 未配置")
     if loc:
         print("登录页   : %s" % loc[:160])
     if online:
@@ -3417,7 +3578,9 @@ def cmd_upgrade(args):
         return 0
 
     ok, msg = apply_upgrade()
-    print(("✓ " if ok else "✗ ") + msg)
+    # 用中文而非 ✓/✗：Windows 控制台代码页是 GBK 时，✓(U+2713) 无法编码，
+    # 会在升级**已成功**之后抛 UnicodeEncodeError 打断输出（0.5.3 实测）
+    print(("升级成功：" if ok else "升级失败：") + msg)
     return 0 if ok else 1
 
 

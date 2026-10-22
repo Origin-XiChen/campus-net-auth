@@ -280,6 +280,8 @@ class TestSanitizeConfig(_StateDirMixin):
 
 def _login_html(exp, mod, encrypt="true"):
     return ('<html><body>'
+            '<input id="username" name="username" type="text" value="">'
+            '<input id="pwd" name="pwd" type="password" value="">'
             '<input type="hidden" id="publicKeyExponent" value="%s">'
             '<input type="hidden" id="publicKeyModulus" value="%s">'
             '<input type="hidden" id="passwordEncrypt" value="%s">'
@@ -333,7 +335,9 @@ class TestPubkeyPinning(_StateDirMixin):
         with m_disc, m_http as m:
             res = client.login("user", "pw")
         self.assertEqual(res.get("result"), "fail")
-        m.assert_not_called()
+        # 关键：密码没有被提交（向 pageInfo 核实加密参数不携带凭据）
+        self.assertFalse([c for c in m.call_args_list
+                          if "method=login" in str(c)])
 
     def test_pin_disabled_proceeds(self):
         cn.save_state({"portal_pubkey_fp": "0" * 64})

@@ -30,6 +30,11 @@
       "expect": ""
     }
   ],
+  "login_page_hints": {
+    "wlanacname": "logic",
+    "nasip": "10.253.0.17",
+    "url": ""
+  },
   "pin_pubkey": true,
   "log_level": "INFO"
 }
