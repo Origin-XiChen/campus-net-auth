@@ -8,11 +8,12 @@ rem One-click rebuild of CampusNetAuth.exe (single-file modular deliverable).
 rem - --windowed  : GUI subsystem, no console window on double-click (zero black window)
 rem - --workpath  : build dir (single, unified; --clean avoids stale cache reuse)
 rem - --distpath  : output dir
-rem - --add-data  : embed Daemon.vbs / UI.vbs / CampusNetAuthUninstall.exe inside
-rem                 the exe (released on demand as components from the UI;
-rem                 the uninstaller is released automatically the first time
+rem - --add-data  : embed CampusNetAuthUninstall.exe inside the exe.
+rem                 The uninstaller is released automatically the first time
 rem                 the UI opens - a running exe cannot delete itself, so a
-rem                 separate uninstaller binary is the only way to clean up)
+rem                 separate uninstaller binary is the only way to clean up.
+rem                 Autostart / daemon / UI all run from this same exe; no
+rem                 VBS launcher components are installed anymore (0.6.0).
 rem Output: dist\CampusNetAuth.exe (the ONLY deliverable file), then copied
 rem over the project root copy for dev use.
 rem
@@ -51,8 +52,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo === Building (--onefile --windowed, vbs + uninstaller embedded as assets) ===
-"%PY%" -E -S _pyinst_wrap.py --onefile --windowed --name CampusNetAuth --clean --noconfirm --workpath build --distpath dist --specpath build --add-data "%~dp0CampusNetAuthDaemon.vbs;." --add-data "%~dp0CampusNetAuthUI.vbs;." --add-data "%~dp0build_assets\CampusNetAuthUninstall.exe;." --hidden-import diagnose_probe --hidden-import desktop --hidden-import gui_server --hidden-import webview.platforms.winforms --hidden-import clr_loader campusnet.py
+echo === Building (--onefile --windowed, uninstaller embedded as asset) ===
+"%PY%" -E -S _pyinst_wrap.py --onefile --windowed --name CampusNetAuth --clean --noconfirm --workpath build --distpath dist --specpath build --add-data "%~dp0build_assets\CampusNetAuthUninstall.exe;." --hidden-import diagnose_probe --hidden-import desktop --hidden-import gui_server --hidden-import webview.platforms.winforms --hidden-import clr_loader campusnet.py
 if errorlevel 1 (
   echo.
   echo [ERROR] Build failed. See messages above.
@@ -73,13 +74,13 @@ if exist "%BAK_CFG%" copy /y "%BAK_CFG%" dist\config.json >nul 2>nul
 if exist "%BAK_CRED%" copy /y "%BAK_CRED%" dist\cred.bin >nul 2>nul
 
 echo.
-echo === Build OK (single-file modular deliverable) ===
-echo   dist\CampusNetAuth.exe   (the ONLY deliverable; vbs + uninstaller inside)
+echo === Build OK (single-file portable deliverable) ===
+echo   dist\CampusNetAuth.exe   (the ONLY deliverable; uninstaller inside)
 echo   CampusNetAuth.exe        (copied to project root, dev copy)
 echo.
-echo Modular model: run the exe anywhere - components (autostart / daemon /
-echo UI launcher) are installed on demand from the UI and released next to
-echo the exe. Config/cred are auto-created on first run.
+echo Integrated model: run the exe anywhere. Autostart points directly to
+echo this exe (run with "daemon"), so no VBS launcher components are needed.
+echo Config/cred are auto-created on first run.
 echo The uninstaller (CampusNetAuthUninstall.exe) is released automatically
 echo the first time the UI opens, and can also be started from
 echo "CampusNetAuth.exe uninstaller".

@@ -1763,15 +1763,16 @@ class App(tk.Tk):
 
     def on_toggle_autostart(self, value):
         def work():
-            ok = cn.install_autostart() if value else cn.uninstall_autostart()
-            return {"ok": ok, "value": value}
+            ok, msg = (cn.enable_autostart_service() if value
+                       else cn.disable_autostart_service())
+            return {"ok": ok, "value": value, "msg": msg}
 
         def done(r):
             on = r.get("value")
             ok = r.get("ok")
             self.toast.show(
                 "开机自动认证已%s" % ("启用" if on else "关闭"),
-                "" if ok else "操作未完成，详情见日志",
+                r.get("msg") or ("" if ok else "操作未完成，详情见日志"),
                 kind="ok" if ok else "error")
             self.refresh_status()
 
@@ -1985,11 +1986,13 @@ class App(tk.Tk):
             return
 
         def work():
-            return {"ok": cn.install_autostart()}
+            ok, msg = cn.enable_autostart_service()
+            return {"ok": ok, "msg": msg}
 
         def done(r):
             self.toast.show("开机自启安装",
-                            "已安装" if r.get("ok") else "安装失败，详情见日志",
+                            r.get("msg") or ("已安装" if r.get("ok")
+                                             else "安装失败，详情见日志"),
                             kind="ok" if r.get("ok") else "error")
             self.refresh_status()
 
@@ -2003,11 +2006,13 @@ class App(tk.Tk):
             return
 
         def work():
-            return {"ok": cn.uninstall_autostart()}
+            ok, msg = cn.disable_autostart_service()
+            return {"ok": ok, "msg": msg}
 
         def done(r):
             self.toast.show("开机自启卸载",
-                            "已卸载" if r.get("ok") else "卸载失败，详情见日志",
+                            r.get("msg") or ("已卸载" if r.get("ok")
+                                             else "卸载失败，详情见日志"),
                             kind="ok" if r.get("ok") else "error")
             self.refresh_status()
 

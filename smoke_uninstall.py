@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """卸载器端到端验证（无头、零网络，可进 CI）。
 
-在一个隔离目录里伪造"已经用过的程序目录"（主 exe / 卸载器 / 两个 vbs /
+在一个隔离目录里伪造"已经用过的程序目录"（主 exe / 卸载器 / 旧版 vbs 遗留 /
 配置 / 凭据 / 状态 / 日志与轮转 / pid 文件 / 缓存目录 / 探针报告 / 升级备份
 / 用户无关文件），再跑内置卸载器 --silent，逐项断言：
 
@@ -98,6 +98,17 @@ def build_fixture():
     return victim
 
 
+def make_fake_dead_mei():
+    """0.6.0 起不再内嵌 vbs，_MEI 特征改为卸载器自身（SelfName）。
+    伪造一个"已无进程占用"的解包目录，验证新特征也能被识别并清掉。"""
+    d = os.path.join(tempfile.gettempdir(), "_MEI_cna_dead_%d" % os.getpid())
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d, exist_ok=True)
+    w(os.path.join(d, "CampusNetAuthUninstall.exe"), b"MZ" + b"\x00" * 64)
+    w(os.path.join(d, "python314.dll"), b"MZ" + b"\x00" * 64)
+    return d
+
+
 def make_fake_live_mei():
     """伪造"另一个正在运行的实例"的解包目录：带本程序特征 vbs，且里面有个
     被**独占打开**的 dll（模拟被进程映射的 python3xx.dll）。
@@ -139,6 +150,8 @@ def main():
     live_mei, live_handles = make_fake_live_mei()
     rec("[准备] 伪造「在用的」解包目录: %s（独占句柄 %d 个）"
         % (live_mei, len(live_handles)))
+    dead_mei = make_fake_dead_mei()
+    rec("[准备] 伪造「无占用」的新式解包目录: %s" % dead_mei)
 
     # 起一个"占用 exe 的进程"：把 ping.exe 复制成 CampusNetAuth.exe 跑 90 秒，
     # 模拟 onefile 引导父进程持有 exe 文件句柄（Windows 下它会锁住文件）
@@ -234,6 +247,8 @@ def main():
     check("在用的解包目录内文件未被删（vbs 仍在）",
           os.path.exists(os.path.join(live_mei, "CampusNetAuthDaemon.vbs"))
           and os.path.exists(os.path.join(live_mei, "python314.dll")))
+    check("无占用的新式解包目录已清理（仅含卸载器特征）",
+          not os.path.exists(dead_mei), dead_mei)
     if os.path.exists(report):
         txt2 = open(report, encoding="utf-8-sig").read()
         check("报告里说明是「跳过」而不是失败",

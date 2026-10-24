@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""整体回归冒烟：静态校验 + 单元 + exe 后端 API 链路 + 组件状态 + 健康检查 + 退出清理。
+"""整体回归冒烟：静态校验 + 单元 + exe 后端 API 链路 + 一体化服务 + 健康检查 + 退出清理。
 
 一次性脚本，跑完即删。结果写入 _smoke_result.txt
 """
@@ -342,6 +342,10 @@ def main():
         p.kill()
         return 3
     rec("  [信息] %s（启动耗时已含 onefile 解压）" % url)
+    # UI 自己的 onefile 解包目录 = 本次启动新增的 _MEI。后面第 5 节只断言它被删掉；
+    # 其它实例（守护/自检子进程）各自持有私有 _MEI，退出时机与本测试无关，
+    # 一律不参与断言，避免把一个刚被强杀的守护留下的目录误算成 UI 残留。
+    ui_mei = mei_set() - mei_before
     # URL 上携带会话 token（gui_server 鉴权），API 调用需拆出 base 与 token
     global TOKEN
     BASE = url.split("?", 1)[0]
@@ -352,10 +356,11 @@ def main():
     html = get_text(url)
     check("GET / 返回内嵌 UI", "CampusNetAuth · 校园网无感认证" in html)
     check("前端含自启健康警示位", 'id="autostartWarn"' in html)
+    check("前端含远程更新提示位", 'id="remoteUpdateWarn"' in html)
 
     st = http(BASE + "api/status")
     for k in ("online", "autostart", "autostart_health", "daemon",
-              "daemon_pid", "components", "first_deploy", "foreign_files",
+              "daemon_pid", "update", "first_deploy", "foreign_files",
               "last_error", "events", "cfg", "host", "interval", "username",
               # 独立卸载器（打开界面时自动释放到 exe 同目录）
               "uninstaller",
@@ -367,11 +372,11 @@ def main():
         check("status 字段 %s" % k, k in st, "" if k in st else "缺失")
     check("net_text 非空字符串", isinstance(st.get("net_text"), str)
           and bool(st.get("net_text")), "net_text=%r" % st.get("net_text"))
-    rec("  [信息] components=%s autostart=%s daemon=%s" %
-        (st.get("components"), st.get("autostart"), st.get("daemon")))
+    rec("  [信息] update=%s autostart=%s daemon=%s" %
+        (st.get("update"), st.get("autostart"), st.get("daemon")))
     check("app_version 与 exe 版本一致", st.get("app_version") == APP_VER,
           "status=%r exe=%r" % (st.get("app_version"), APP_VER))
-    # 没有守护在跑（本目录未安装值守组件）时不应误报"守护陈旧"
+    # 没有守护在跑（本目录没有组件概念）时不应误报"守护陈旧"
     check("无守护时 daemon_stale 为假", st.get("daemon_stale") is False,
           "stale=%r reason=%r" % (st.get("daemon_stale"),
                                   st.get("daemon_stale_reason")))
@@ -443,20 +448,31 @@ def main():
         check("卸载器不在 foreign_files（属自家产物）",
               cn.UNINSTALL_EXE_NAME not in (st.get("foreign_files") or []))
 
-    # ========== 3. 组件状态 ==========
-    rec("\n===== 3. 组件安装 / 状态 / 卸载 =====")
-    r = http(BASE + "api/components/install", "POST", {"name": "daemon"})
-    rec("  [信息] install daemon -> %s" % r)
-    check("daemon 组件安装", r.get("ok") is True, r.get("message", ""))
-    check("仅释放 vbs（无 exe 副本）",
-          os.path.exists(os.path.join(VERIFY, "CampusNetAuthDaemon.vbs"))
-          and not os.path.exists(
-              os.path.join(VERIFY, "CampusNetAuthDaemon.exe")))
+    # ========== 3. 一体化后台服务（无组件安装）==========
+    rec("\n===== 3. 一体化后台服务（无组件安装）=====")
+    r = http(BASE + "api/daemon/start", "POST")
+    rec("  [信息] daemon/start -> %s" % r)
+    check("守护可直接启动（不再依赖值守组件）",
+          r.get("ok") is True, str(r.get("error", "")))
     time.sleep(10)
     st = http(BASE + "api/status")
-    check("M1 安装即拉起守护", st.get("daemon") is True,
+    check("M1 守护已在运行", st.get("daemon") is True,
           "pid=%s" % st.get("daemon_pid"))
-    rec("  [信息] components=%s" % st.get("components"))
+    check("status 不再暴露 components 字段", "components" not in st)
+    check("未释放任何 VBS 组件",
+          not os.path.exists(os.path.join(VERIFY, cn.DAEMON_VBS_NAME))
+          and not os.path.exists(os.path.join(VERIFY, cn.UI_VBS_NAME)))
+    upd = st.get("update") or {}
+    check("status.update 透出更新检查结构",
+          "available" in upd and "current" in upd, str(upd)[:120])
+
+    # 更新检查接口：离线/在线都应返回结构（网络失败按"检查失败"处理，不抛异常）
+    r = http(BASE + "api/update/check", "POST")
+    u = (r or {}).get("update") or {}
+    check("update/check 返回结构", r.get("ok") is True and "available" in u,
+          "ok=%r error=%r" % (u.get("ok"), u.get("error")))
+    check("检查失败时不误报可用更新", u.get("ok") or not u.get("available"),
+          str(u)[:120])
 
     r = http(BASE + "api/daemon/stop", "POST")
     time.sleep(2)
@@ -464,41 +480,41 @@ def main():
     check("守护优雅停止", r.get("ok") is True and st.get("daemon") is False,
           "port_free=%s" % (not cn.daemon_running()))
 
-    # ========== 4. 自启健康检查透出 ==========
-    rec("\n===== 4. 自启健康检查（新功能透出）=====")
+    # ========== 4. 自启（Run 键直接指向 exe）==========
+    rec("\n===== 4. 自启安装 / 健康检查 =====")
     r = http(BASE + "api/autostart/install", "POST")
     ok_reg = r.get("ok") is True
-    check("自启组件安装", ok_reg, r.get("message", ""))
+    check("自启写入成功", ok_reg, r.get("message", ""))
+    val = reg_read() or ""
+    exe_path = os.path.join(VERIFY, "CampusNetAuth.exe")
+    check("Run 键直接指向 exe（无 wscript/vbs）",
+          exe_path.lower() in val.lower() and "wscript" not in val.lower()
+          and ".vbs" not in val.lower(), val)
     st = http(BASE + "api/status")
     ah = st.get("autostart_health") or [None, ""]
     rec("  [信息] Run键=%r health=%s" % (reg_read(), ah))
     check("健康时 autostart_health=(True,'')", ah[0] is True and ah[1] == "",
           str(ah))
 
-    # 负例：把 vbs 挪走 → 健康检查应报"启动器已丢失"并透出到 /api/status
-    vbs = os.path.join(VERIFY, "CampusNetAuthDaemon.vbs")
-    bak = vbs + ".smokebak"
-    if os.path.exists(vbs):
-        os.rename(vbs, bak)
-        st = http(BASE + "api/status")
-        ah2 = st.get("autostart_health") or [None, ""]
-        rec("  [信息] 负例 health=%s" % (ah2,))
-        check("缺失时健康检查报警",
-              ah2[0] is False and "丢失" in (ah2[1] or ""), str(ah2))
-        os.rename(bak, vbs)
-        st = http(BASE + "api/status")
-        check("恢复后健康检查转好",
-              (st.get("autostart_health") or [None])[0] is True)
+    # 负例：Run 键指向不存在的 exe → 健康检查报警；重新安装后转好
+    reg_set('"%s" daemon' % os.path.join(VERIFY, "CampusNetAuth_missing.exe"))
+    st = http(BASE + "api/status")
+    ah2 = st.get("autostart_health") or [None, ""]
+    rec("  [信息] 负例 health=%s" % (ah2,))
+    check("缺失时健康检查报警",
+          ah2[0] is False and "丢失" in (ah2[1] or ""), str(ah2))
+    r = http(BASE + "api/autostart/install", "POST")
+    check("重新安装自启成功", r.get("ok") is True, r.get("message", ""))
+    st = http(BASE + "api/status")
+    check("恢复后健康检查转好",
+          (st.get("autostart_health") or [None])[0] is True)
 
-    # 卸载守卫：自启启用时不得卸值守组件
-    r = http(BASE + "api/components/uninstall", "POST", {"name": "daemon"})
-    check("自启启用时拒绝卸值守", r.get("ok") is False, r.get("message", ""))
-    r = http(BASE + "api/components/uninstall", "POST", {"name": "autostart"})
-    check("卸自启成功", r.get("ok") is True, r.get("message", ""))
-    check("卸自启后 vbs 保留(与值守共用)", os.path.exists(vbs))
-    r = http(BASE + "api/components/uninstall", "POST", {"name": "daemon"})
-    check("卸值守成功", r.get("ok") is True, r.get("message", ""))
-    check("卸值守后 vbs 移除", not os.path.exists(vbs))
+    r = http(BASE + "api/autostart/uninstall", "POST")
+    check("关闭自启成功", r.get("ok") is True, r.get("message", ""))
+    check("Run 键已删除", reg_read() is None, repr(reg_read()))
+    # 安装自启会顺带拉起守护；这里停掉，避免干扰后面的退出/daemon 角色测试
+    http(BASE + "api/daemon/stop", "POST")
+    time.sleep(2)
 
     # ========== 5. 退出清理（A 方案路径）==========
     rec("\n===== 5. UI 退出清理（_%s）=====" % "MEI")
@@ -524,8 +540,10 @@ def main():
     check("UI 进程退出码 0", rc == 0, "rc=%s" % rc)
     time.sleep(2)
     mei_after = mei_set()
-    new_mei = sorted(mei_after - mei_before)
-    check("无新增 _MEI 残留", not new_mei, str(new_mei))
+    left_ui = sorted(ui_mei & mei_after)
+    check("UI 自己的 _MEI 已删除", not left_ui, str(left_ui))
+    others = sorted(mei_after - mei_before - ui_mei)
+    rec("  [信息] 其它实例的解包目录（不参与断言）: %s" % (others or "无"))
 
     # ========== 6. daemon 角色退出 ==========
     rec("\n===== 6. daemon 角色启动 / STOP 优雅退出 =====")

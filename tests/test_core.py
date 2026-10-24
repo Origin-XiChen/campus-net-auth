@@ -708,23 +708,9 @@ class TestDaemonRefreshGuard(unittest.TestCase):
         self.assertFalse(restarted)
         self.assertEqual(reason, "")
 
-    def test_refuses_when_component_missing(self):
-        """值守组件缺失 → 停掉就再也起不来，必须拒绝动手。"""
-        with mock.patch.object(cn, "daemon_stale",
-                               return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=False), \
-             mock.patch.object(cn, "stop_daemon") as stop:
-            restarted, reason = cn.ensure_daemon_fresh(force=True)
-        self.assertFalse(restarted)
-        self.assertEqual(reason, "版本不符")
-        stop.assert_not_called()
-
     def test_restarts_when_stale(self):
         with mock.patch.object(cn, "daemon_stale",
                                return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=True), \
              mock.patch.object(cn, "stop_daemon", return_value=True), \
              mock.patch.object(cn, "start_daemon", return_value=True), \
              mock.patch.object(cn, "record_event") as ev:
@@ -735,8 +721,6 @@ class TestDaemonRefreshGuard(unittest.TestCase):
     def test_reports_failure_when_start_fails(self):
         with mock.patch.object(cn, "daemon_stale",
                                return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=True), \
              mock.patch.object(cn, "stop_daemon", return_value=True), \
              mock.patch.object(cn, "start_daemon", return_value=False):
             restarted, _reason = cn.ensure_daemon_fresh(force=True)
@@ -746,8 +730,6 @@ class TestDaemonRefreshGuard(unittest.TestCase):
         cn._STALE_REFRESH["last"] = 0.0
         with mock.patch.object(cn, "daemon_stale",
                                return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=True), \
              mock.patch.object(cn, "stop_daemon", return_value=True), \
              mock.patch.object(cn, "start_daemon", return_value=True), \
              mock.patch.object(cn, "record_event"), \
@@ -939,7 +921,7 @@ class _FakeWinreg(types.ModuleType):
 
 
 class TestAutostartRunKey(unittest.TestCase):
-    """Run 键命令格式（//B 静默）与"目录被搬走"后的自愈。
+    """Run 键直接指向 exe，以及旧版 VBS 自启的自动迁移。
 
     全程用假 winreg + 虚拟文件表，不写真实注册表、不落任何磁盘文件。
     """
@@ -949,7 +931,7 @@ class TestAutostartRunKey(unittest.TestCase):
         self.other = os.path.abspath("_cna_fake_other")
         self.vbs = os.path.join(self.dir, cn.DAEMON_VBS_NAME)
         self.exe = os.path.join(self.dir, "CampusNetAuth.exe")
-        self.files = {self.vbs.lower(), self.exe.lower()}
+        self.files = {self.exe.lower()}
         self.reg = _FakeWinreg()
 
         def _exists(p):
@@ -964,6 +946,7 @@ class TestAutostartRunKey(unittest.TestCase):
             mock.patch.object(cn.os.path, "exists", _exists),
             mock.patch.object(cn, "_clean_legacy_task"),  # 不真跑 schtasks
             mock.patch.object(cn.sys, "frozen", True, create=True),
+            mock.patch.object(cn.sys, "executable", self.exe),
         ]
         for p in self._patches:
             p.start()
@@ -973,38 +956,45 @@ class TestAutostartRunKey(unittest.TestCase):
             p.stop()
 
     def _want(self):
-        return 'wscript.exe //B "%s"' % self.vbs
+        return '"%s" daemon' % self.exe
 
-    def test_cmd_uses_batch_flag(self):
-        """//B 是关键：缺了它，目录被绿色删除后开机会弹模态报错框。"""
+    def test_cmd_points_to_self_exe(self):
+        """0.6.0 起自启直接运行 exe，不再经 wscript/VBS 中转。"""
         self.assertEqual(cn._autostart_cmd(), self._want())
+        self.assertNotIn("wscript", cn._autostart_cmd().lower())
 
-    def test_install_writes_batch_cmd(self):
+    def test_install_writes_exe_cmd(self):
         self.assertTrue(cn.install_autostart())
         self.assertEqual(self.reg.values.get(cn.TASK_NAME), self._want())
 
-    def test_health_parses_batch_cmd(self):
-        """健康检查要能跳过 //B 找到引号里的启动器路径。"""
+    def test_health_parses_exe_cmd(self):
         cn.install_autostart()
         self.assertEqual(cn.autostart_health(), (True, ""))
 
-    def test_health_flags_missing_launcher_with_batch_cmd(self):
-        cn.install_autostart()
-        self.files.discard(self.vbs.lower())
+    def test_health_flags_missing_exe(self):
+        self.reg.values[cn.TASK_NAME] = self._want()
+        self.files.discard(self.exe.lower())
         ok, msg = cn.autostart_health()
         self.assertFalse(ok)
         self.assertIn("丢失", msg)
 
+    def test_health_accepts_legacy_vbs_if_present(self):
+        """旧版 VBS 自启文件齐全 → 仍视为健康（启动时会被自动迁移）。"""
+        self.files.add(self.vbs.lower())
+        self.reg.values[cn.TASK_NAME] = 'wscript.exe //B "%s"' % self.vbs
+        self.assertEqual(cn.autostart_health(), (True, ""))
+
     def test_repair_repoints_moved_folder(self):
-        """目录被搬走（旧路径已不存在）→ 自启改指当前目录。"""
+        """目录被搬走（旧路径已不存在）→ 自启改指当前 exe。"""
         old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
         self.reg.values[cn.TASK_NAME] = old
         self.assertTrue(cn.repair_autostart_cmd())
         self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
 
-    def test_repair_upgrades_old_format_in_place(self):
-        """就装在当前目录但命令是旧格式（无 //B）→ 原地升级。"""
-        self.reg.values[cn.TASK_NAME] = 'wscript.exe "%s"' % self.vbs
+    def test_repair_migrates_legacy_vbs_in_place(self):
+        """旧版 wscript+VBS 就在当前目录 → 迁移为直接运行 exe。"""
+        self.files.add(self.vbs.lower())
+        self.reg.values[cn.TASK_NAME] = 'wscript.exe //B "%s"' % self.vbs
         self.assertTrue(cn.repair_autostart_cmd())
         self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
 
@@ -1021,13 +1011,12 @@ class TestAutostartRunKey(unittest.TestCase):
         self.assertFalse(cn.repair_autostart_cmd())
         self.assertEqual(self.reg.values, {})
 
-    def test_repair_skipped_when_launcher_absent(self):
-        """当前目录没有启动器（残缺安装）→ 交给健康检查警示，不改写。"""
-        self.files.discard(self.vbs.lower())
-        old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
+    def test_repair_migrates_legacy_vbs_even_if_missing(self):
+        """旧版 VBS 被手动删除（残缺自启）→ 直接改指当前 exe。"""
+        old = 'wscript.exe "%s"' % self.vbs
         self.reg.values[cn.TASK_NAME] = old
-        self.assertFalse(cn.repair_autostart_cmd())
-        self.assertEqual(self.reg.values[cn.TASK_NAME], old)
+        self.assertTrue(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
 
     def test_repair_skipped_in_dev_mode(self):
         with mock.patch.object(cn.sys, "frozen", False, create=True):

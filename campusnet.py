@@ -33,6 +33,7 @@ import subprocess
 import threading
 import http.client
 import urllib.parse
+import urllib.request
 import contextlib
 import logging.handlers
 import concurrent.futures as _cf
@@ -129,7 +130,15 @@ _MEI_CLEANED = _cleanup_stale_mei()
 # 0.5.2 = 内置彻底卸载器（随界面自动释放）+ 守护停机/进程归属硬化
 # 0.5.3 = 公网探测无结论时的认证阻塞与退避修复（PR#3）+ 登录页发现优先重定向（PR#2）
 #         + 状态文案不再把"探测无结论"误报成"网络不可达"
-APP_VERSION = "0.5.4"
+# 0.6.0 = 自启/守护/界面合并为同一个 exe（不再释放 VBS 组件）+ Release 更新检查
+APP_VERSION = "0.6.0"
+GITHUB_REPO = "Origin-XiChen/campus-net-auth"
+GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
+GITHUB_API_LATEST = ("https://api.github.com/repos/%s/releases/latest"
+                     % GITHUB_REPO)
+# Release 检查缓存：成功 6 小时、失败 5 分钟。只读网络，不自动下载。
+UPDATE_CHECK_TTL = 6 * 3600
+UPDATE_CHECK_FAIL_TTL = 300
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -1583,6 +1592,106 @@ def _ver_key(text):
     return tuple(parts[:4])
 
 
+# ---- GitHub Release 更新检查（只检查，不下载、不替换文件）----
+_UPDATE_CACHE = {"t": 0.0, "data": None}
+_UPDATE_LOCK = threading.Lock()
+
+
+def _release_version(tag):
+    """把 Release 标签 "V0.6.0" / "v0.6.0" 归一成 "0.6.0"。"""
+    text = str(tag or "").strip()
+    return text[1:] if text[:1] in ("v", "V") else text
+
+
+def _release_url_allowed(url):
+    """只允许打开本仓库的 Release 页面，避免把任意 URL 交给浏览器。"""
+    return (isinstance(url, str)
+            and url.startswith("https://github.com/%s/releases/" % GITHUB_REPO))
+
+
+def _default_update_info():
+    return {
+        "ok": False, "current": APP_VERSION, "latest": "", "available": False,
+        "url": GITHUB_RELEASES_URL, "name": "", "published_at": "",
+        "checked_at": 0, "error": "",
+    }
+
+
+def get_update_info():
+    """读取上一次 Release 检查的缓存（绝不发网络请求）。"""
+    with _UPDATE_LOCK:
+        data = _UPDATE_CACHE["data"]
+        return dict(data) if data is not None else _default_update_info()
+
+
+def check_latest_release(force=False, timeout=5.0):
+    """查询 GitHub 最新正式 Release，返回可 JSON 序列化的结果。
+
+    只使用标准库；失败不抛异常，由调用方决定是否提示。成功缓存 6 小时，
+    失败缓存 5 分钟，避免界面反复轮询时打满 GitHub 的匿名 API 限额。
+    """
+    now = time.time()
+    with _UPDATE_LOCK:
+        cached = _UPDATE_CACHE["data"]
+        if cached is not None and not force:
+            ttl = UPDATE_CHECK_TTL if cached.get("ok") else UPDATE_CHECK_FAIL_TTL
+            if now - _UPDATE_CACHE["t"] < ttl:
+                return dict(cached)
+
+    info = _default_update_info()
+    try:
+        req = urllib.request.Request(
+            GITHUB_API_LATEST,
+            headers={
+                "User-Agent": "CampusNetAuth/" + APP_VERSION,
+                "Accept": "application/vnd.github+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        if not isinstance(payload, dict):
+            raise ValueError("GitHub API 返回格式异常")
+        latest = _release_version(payload.get("tag_name"))
+        if not _ver_key(latest):
+            raise ValueError("无法解析 Release 版本号: %r"
+                             % (payload.get("tag_name"),))
+        info.update({
+            "ok": True,
+            "latest": latest,
+            "available": _ver_key(latest) > _ver_key(APP_VERSION),
+            "name": str(payload.get("name") or ""),
+            "published_at": str(payload.get("published_at") or ""),
+        })
+        html_url = payload.get("html_url")
+        if _release_url_allowed(html_url):
+            info["url"] = html_url
+        log.debug("Release 检查：当前 %s / 最新 %s / 可用更新=%s",
+                  APP_VERSION, latest, info["available"])
+    except Exception as e:  # noqa: BLE001 网络/解析失败都按"检查失败"处理
+        info["error"] = "%s: %s" % (e.__class__.__name__, e)
+        log.debug("检查 GitHub Release 失败: %r", e)
+    info["checked_at"] = int(time.time())
+    with _UPDATE_LOCK:
+        _UPDATE_CACHE["t"] = time.time()
+        _UPDATE_CACHE["data"] = dict(info)
+    return info
+
+
+def open_release_page():
+    """用系统浏览器打开缓存的 Release 页面（只接受本仓库地址）。"""
+    info = get_update_info()
+    url = info.get("url") or GITHUB_RELEASES_URL
+    if url != GITHUB_RELEASES_URL and not _release_url_allowed(url):
+        log.warning("拒绝打开非本仓库 Release 地址: %r", url)
+        return False
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception as e:  # noqa: BLE001
+        log.warning("打开 Release 页面失败: %r", e)
+        return False
+
+
 def _parse_ver_ack(text):
     """解析守护回执 "OK <version>\\t<exe_path>" → (version, path)。"""
     t = (text or "").strip()
@@ -1669,12 +1778,6 @@ def ensure_daemon_fresh(force=False):
     stale, ver, reason = daemon_stale()
     if not stale:
         return False, ""
-    if not daemon_component_installed():
-        # ⚠️ 能停不能起 = 把用户的守护直接搞没，绝不能做。
-        # 值守组件（vbs 启动器）缺失时只报告、不动手，交给界面提示安装。
-        log.warning("检测到守护版本陈旧（%s），但值守组件缺失无法自动重启，"
-                    "请在界面「组件管理」安装值守组件", reason)
-        return False, reason
     now = time.time()
     if not force and now - _STALE_REFRESH["last"] < STALE_REFRESH_COOLDOWN:
         return False, "冷却中（%s）" % reason
@@ -1683,7 +1786,7 @@ def ensure_daemon_fresh(force=False):
     if not stop_daemon():
         log.warning("停止旧守护未完全成功，仍继续尝试启动")
     if not start_daemon():
-        log.error("守护重启失败（值守组件未安装或启动异常）")
+        log.error("守护重启失败（启动异常）")
         return False, reason
     record_event("daemon_refresh",
                  "后台守护已自动重启（%s → %s）" % (ver or "旧版", APP_VERSION))
@@ -1786,8 +1889,7 @@ def cleanup_upgrade_backup():
 
 
 # 绝不能被当成"升级候选"的同前缀文件名（卸载器 / 历史 daemon exe 副本）。
-# ⚠️ 定义在函数内部：这两个常量在"组件系统"段才声明，位于本函数之后，
-# 模块级求值会 NameError。
+# ⚠️ 定义在函数内部：这两个常量在本函数之后才声明，模块级求值会 NameError。
 
 
 def find_upgrade_candidate():
@@ -2849,11 +2951,9 @@ def pythonw_path():
     return sys.executable
 
 
-# ============================ 模块化组件系统 ============================
-# 单文件便携模式：exe 自带守护全部能力，组件文件（vbs 启动器）
-# 由用户从 UI 按需「安装」放出、按需「卸载」移除。
-# 注：2026-08-31 起不再有 CampusNetAuthDaemon.exe 命名副本（守护 = 同一
-# exe + daemon 参数），DAEMON_EXE_NAME 仅用于识别/清理历史遗留文件。
+# ====================== 单文件资源与历史遗留组件 ======================
+# 0.6.0 起自启 / 守护 / 界面全部由同一个 exe 承担，不再释放 VBS 组件。
+# VBS / Daemon.exe 名称仅用于识别并清理旧版本遗留文件。
 
 DAEMON_EXE_NAME = "CampusNetAuthDaemon.exe"
 DAEMON_VBS_NAME = "CampusNetAuthDaemon.vbs"
@@ -2900,45 +3000,6 @@ def _asset_path(name):
     if os.path.exists(p):
         return p
     return os.path.join(here, "build_assets", name)
-
-
-def release_asset(name, force=False):
-    """把内置资源释放到 BASE_DIR（已存在且未要求强制时视为已安装）。
-    返回是否可用（已存在或释放成功）。"""
-    src = _asset_path(name)
-    if not os.path.exists(src):
-        log.error("内置资源缺失: %s（打包时未打入？）", name)
-        return False
-    dst = os.path.join(BASE_DIR, name)
-    if os.path.exists(dst) and not force:
-        return True
-    try:
-        shutil.copy2(src, dst)
-        log.info("已释放组件文件: %s", dst)
-        return True
-    except Exception as e:
-        log.error("释放 %s 失败: %r", name, e)
-        return False
-
-
-def _remove_file(name):
-    """移除组件文件。Windows 上进程刚退出时文件可能还被引导进程短暂持有
-    共享锁（onefile 模式尤其明显），故带短重试：最多 ~6 秒。"""
-    p = os.path.join(BASE_DIR, name)
-    deadline = time.time() + 6
-    last_err = None
-    while time.time() < deadline:
-        if not os.path.exists(p):
-            return True
-        try:
-            os.remove(p)
-            log.info("已移除组件文件: %s", p)
-            return True
-        except Exception as e:
-            last_err = e
-            time.sleep(0.3)
-    log.error("移除 %s 失败: %r", name, last_err)
-    return False
 
 
 def uninstaller_path():
@@ -3035,105 +3096,35 @@ def mark_first_run():
             save_state(st)
 
 
-def _ensure_daemon_vbs():
-    """值守组件安装：释放守护启动器 CampusNetAuthDaemon.vbs（约 1.2KB 容错版）。
+def enable_autostart_service():
+    """一键开启自启服务：写 Run 键 + 确保守护在跑（不再安装 VBS 组件）。
 
-    守护核心能力内置在 exe 中，用「同一 exe + daemon 参数」启动，
-    vbs 只是无窗口启动器（与开机自启共用同一文件）。
-    不再复制 18.8MB 的 CampusNetAuthDaemon.exe 命名副本（2026-08-31 优化）。"""
-    return release_asset(DAEMON_VBS_NAME)
-
-
-def daemon_component_installed():
-    """值守组件已装 = 守护启动器 vbs 就位（可手动启动守护）。"""
-    return os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME))
-
-
-def ui_component_installed():
-    return os.path.exists(os.path.join(BASE_DIR, UI_VBS_NAME))
-
-
-def autostart_component_status():
-    """开机自启组件状态：以 Run 键 + 启动器 vbs 完整性共同判断。
-    missing=未安装 / installed=启动器就位但未启用 / enabled=已安装并启用
-
-    ⚠️ 2026-09-01 修复：仅看 Run 键不看启动器文件 → Run 键残留但 vbs 缺失时
-    误报 enabled，导致"已启用"误导用户，且开机自启必失败（80070002）。
-    修复：vbs 缺失统一视为 missing（无论 Run 键是否残留）。"""
-    vbs_ok = os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME))
-    if not vbs_ok:
-        # 启动器缺失 → 视为未安装（无论 Run 键是否残留，避免假象）
-        return "missing"
-    if autostart_status():
-        return "enabled"
-    return "installed"
+    返回 (ok, message)。自启写入成功但守护启动失败时仍返回 True，
+    因为开机自启已生效；由界面提示用户手动点「启动守护」。
+    """
+    if not install_autostart():
+        return False, "写入开机自启注册表失败，详见日志"
+    try:
+        if not daemon_running():
+            start_daemon()
+    except Exception as e:
+        log.warning("自启已启用，但启动守护失败: %r", e)
+        return True, "开机自启已启用，但守护启动失败，请点「启动守护」重试"
+    return True, "开机自启已启用，后台守护已启动"
 
 
-def components_status():
-    return {
-        "autostart": autostart_component_status(),
-        "daemon": "installed" if daemon_component_installed() else "missing",
-        "ui": "installed" if ui_component_installed() else "missing",
-    }
-
-
-def install_component(name):
-    """安装组件，返回 (ok, message)。
-    autostart=Daemon.vbs+注册表 Run 键；daemon=守护启动器 vbs（不再复制 exe 副本）；
-    ui=UI.vbs 静默启动器。"""
-    if name == "autostart":
-        if not release_asset(DAEMON_VBS_NAME):
-            return False, "释放 Daemon.vbs 失败（资源缺失，请重新打包）"
-        if not install_autostart():
-            return False, "写入开机自启注册表失败，详见日志"
-        return True, "开机自启组件已安装并启用"
-    if name == "daemon":
-        if not _ensure_daemon_vbs():
-            return False, "释放守护启动器失败（资源缺失，请重新打包）"
-        # 安装即生效：启动器就位后立即拉起守护（已运行则幂等跳过），
-        # 避免"装了忘启动"的空窗期
-        try:
-            if not daemon_running():
-                start_daemon()
-        except Exception as e:
-            log.warning("值守组件安装后自动启动守护失败: %r", e)
-        return True, "值守组件已安装（守护启动器 vbs 已就位，不再复制 exe 副本）"
-    if name == "ui":
-        if not release_asset(UI_VBS_NAME):
-            return False, "释放 UI.vbs 失败（资源缺失，请重新打包）"
-        return True, "界面启动器组件已安装"
-    return False, "未知组件: %s" % name
-
-
-def uninstall_component(name):
-    """卸载组件：移除放出的文件（自启顺带删除注册表 Run 键）。
-    返回 (ok, message)。"""
-    if name == "autostart":
-        uninstall_autostart()
-        # vbs 归值守组件管理：自启卸载只删 Run 键，保留 vbs 供守护使用
-        return True, "开机自启组件已卸载（Run 键已删除，守护启动器保留）"
-    if name == "daemon":
-        if daemon_running():
-            return False, "守护正在运行，请先「停止守护」再卸载"
-        if autostart_status():
-            return False, "开机自启仍在启用中（Run 键依赖此启动器），请先卸载「开机自启组件」"
-        ok = _remove_file(DAEMON_VBS_NAME)
-        return ok, ("值守组件已卸载" if ok
-                    else "移除 Daemon.vbs 失败，详见日志")
-    if name == "ui":
-        ok = _remove_file(UI_VBS_NAME)
-        return ok, ("界面启动器组件已卸载" if ok
-                    else "移除 UI.vbs 失败，详见日志")
-    return False, "未知组件: %s" % name
+def disable_autostart_service():
+    """关闭自启服务：只删 Run 键，当前运行中的守护不受影响。"""
+    ok = uninstall_autostart()
+    return ok, ("开机自启已关闭（当前守护未受影响）" if ok
+                else "移除开机自启失败，详见日志")
 
 
 def daemon_exe():
-    """返回守护进程可执行文件路径（严格组件模式）。
+    """返回守护进程可执行文件路径。
 
-    * 打包态：直接返回自身 exe（守护 = 同一 CampusNetAuth.exe + daemon 参数，
-      不再需要 CampusNetAuthDaemon.exe 命名副本；组件守卫由调用方按
-      daemon_component_installed() 判定）。
-    * 开发态：保持 pythonw 命名副本逻辑（开发环境无组件概念）。
+    * 打包态：直接返回自身 exe（守护 = 同一 CampusNetAuth.exe + daemon 参数）。
+    * 开发态：保持 pythonw 命名副本逻辑。
     """
     if getattr(sys, "frozen", False):
         return os.path.abspath(sys.executable)
@@ -3158,14 +3149,9 @@ FIRST_DEPLOY = first_deploy()
 
 
 def start_daemon():
-    """以无窗口方式启动守护，返回是否成功。
-    打包态未安装「值守组件」（守护启动器 vbs 缺失）时返回 False。"""
+    """以无窗口方式启动守护，返回是否成功。"""
     if daemon_running():
         return True
-    if not daemon_component_installed():
-        log.error("值守组件未安装（缺少 %s），请先在 UI 安装",
-                  DAEMON_VBS_NAME)
-        return False
     try:
         exe = daemon_exe()
         if getattr(sys, "frozen", False):
@@ -3196,19 +3182,10 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 def _autostart_cmd():
     """注册表 Run 键里存放的启动命令。
 
-    * 打包态：优先 wscript 静默运行同目录的 CampusNetAuthDaemon.vbs
-      （窗口样式 0 = 完全无窗口，登录时不闪任何黑窗）。`//B`（batch 模式）
-      必不可少：目录被"绿色删除/搬走"后 Run 键会指向不存在的 vbs，不带 //B
-      的 wscript 会弹出模态"找不到脚本文件"报错框并卡住登录（实测如此），
-      带 //B 则静默退出（exit 1，零 UI）——vbs 内部本就是 On Error Resume Next
-      的容错启动器，静默失败符合设计。
-      vbs 缺失（被手动删除）时退化为直接运行 exe（仍会被 hide_console 隐藏）。
-    * 开发态：pythonw 命名副本 + 脚本参数（保持原有逻辑）。
+    打包态直接运行自身 exe 的 daemon 子命令（--windowed 构建本身无控制台，
+    不再需要 VBS 中转）。开发态仍是 pythonw + 脚本参数。
     """
     if getattr(sys, "frozen", False):
-        vbs = os.path.join(BASE_DIR, DAEMON_VBS_NAME)
-        if os.path.exists(vbs):
-            return 'wscript.exe //B "%s"' % vbs
         return '"%s" daemon' % os.path.abspath(sys.executable)
     script = os.path.abspath(__file__)
     return '"%s" "%s" daemon' % (daemon_exe(), script)
@@ -3227,14 +3204,10 @@ def _clean_legacy_task():
 def install_autostart():
     """写入 HKCU 运行键：当前用户级自启，无需管理员权限。
     schtasks 在受限环境会报“拒绝访问”，注册表方案更可靠。"""
-    # 前置校验：打包态自启必须经 vbs 静默启动器，vbs 缺失时直接拒绝，
-    # 避免装出一个"开机必弹 80070002"的残缺自启（用户侧已出现此报错）。
+    # 前置校验：Run 键直接指向自身 exe，exe 必须真实存在。
     if getattr(sys, "frozen", False):
-        if not os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME)):
-            log.error("安装开机自启失败: 启动器 %s 缺失", DAEMON_VBS_NAME)
-            return False
-        if not os.path.exists(os.path.join(BASE_DIR, "CampusNetAuth.exe")):
-            log.error("安装开机自启失败: CampusNetAuth.exe 不在程序目录")
+        if not os.path.exists(os.path.abspath(sys.executable)):
+            log.error("安装开机自启失败: 当前 exe 路径不存在")
             return False
     try:
         import winreg
@@ -3292,13 +3265,13 @@ def autostart_status():
 
 
 def autostart_health():
-    """自启链路健康检查：Run 键 → 启动器（vbs/exe）→ exe 全链路文件完整性。
+    """自启链路健康检查：Run 键 → exe（兼容旧版 VBS 启动器）文件完整性。
 
     返回 (ok, reason)：
     * 未启用自启 / Run 键读不到 → (True, "")（未安装不属异常，不打扰用户）
-    * Run 键指向的 vbs 或 exe 缺失 → (False, 原因)。这正是"开机弹
+    * Run 键指向的 exe / vbs 缺失 → (False, 原因)。这正是"开机弹
       80070002 / 系统找不到指定的文件"报错的根因场景，前端据此显示红色警示条，
-      引导用户补齐文件或重装自启组件，而不是等下次开机再弹窗。
+      引导用户重新启用自启，而不是等下次开机再弹窗。
     """
     try:
         import winreg
@@ -3321,13 +3294,14 @@ def autostart_health():
     if not re.search(r"(?i)\.(vbs|exe)$", ref):
         return True, ""
     if ref.lower().endswith(".vbs"):
+        # 旧版通过 VBS 启动器自启：文件齐全即视为健康（启动时会被自动迁移）
         exe_path = os.path.join(os.path.dirname(ref), "CampusNetAuth.exe")
         if not os.path.exists(ref):
             return False, "开机自启指向的启动器已丢失：" + ref
         if not os.path.exists(exe_path):
             return False, ("开机自启将失败：启动器目录缺少 CampusNetAuth.exe，"
                            "请把 exe 与 " + DAEMON_VBS_NAME + " 放在同一文件夹，"
-                           "或卸载后重新安装「开机自启组件」")
+                           "或在界面重新启用开机自启")
         return True, ""
     if not os.path.exists(ref):
         return False, "开机自启指向的程序已丢失：" + ref
@@ -3335,21 +3309,18 @@ def autostart_health():
 
 
 def repair_autostart_cmd():
-    """自愈 Run 键命令：程序目录被搬走/改名后把自启重新指到当前位置。
+    """自愈 Run 键命令：迁移旧版 VBS 启动器 / 修正被搬走的程序路径。
 
-    只在两种情况下重写，其余一律不动作：
+    重写条件（其余一律不动作）：
     * Run 键指向的文件已不存在（目录被移动或删除）；
-    * Run 键指向的就是当前目录，但命令是旧格式（缺 //B）→ 原地升级。
+    * Run 键指向当前目录（旧版 wscript+VBS 或旧格式命令）→ 统一升级为
+      `"<当前 exe>" daemon`。
     指向"另一份仍然存在的安装"时不动手：测试副本 / 多副本实例不得劫持
     用户真实安装的自启。仅打包态生效（开发态的 pythonw 路径不在此列）。
     """
     if not getattr(sys, "frozen", False):
         return False
     want = _autostart_cmd()
-    if DAEMON_VBS_NAME not in want:
-        # 当前目录没有启动器（残缺安装）：交给 autostart_health 的红色
-        # 警示条引导用户，不在这里擅自改写
-        return False
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
@@ -3531,6 +3502,16 @@ def cmd_status(args):
         else:
             print("守护版本 : 未知（%s）" % _dd)
     print("凭据文件 : %s" % ("已存在" if os.path.exists(CRED_PATH) else "缺失"))
+    _upd = get_update_info()
+    if not _upd.get("checked_at"):
+        print("远程更新 : 未检查（执行 update 检查）")
+    elif not _upd.get("ok"):
+        print("远程更新 : 检查失败（%s）" % (_upd.get("error") or "未知"))
+    elif _upd.get("available"):
+        print("远程更新 : 发现 v%s（%s）"
+              % (_upd.get("latest"), _upd.get("url")))
+    else:
+        print("远程更新 : 已是最新（v%s）" % _upd.get("latest"))
     # 登录页兜底：网关不做 302 劫持时靠它自己拼登录页，填错了很难自查
     hints = cfg.get("login_page_hints") or {}
     if isinstance(hints, dict) and hints.get("nasip") and hints.get("wlanacname"):
@@ -3582,6 +3563,25 @@ def cmd_upgrade(args):
     # 会在升级**已成功**之后抛 UnicodeEncodeError 打断输出（0.5.3 实测）
     print(("升级成功：" if ok else "升级失败：") + msg)
     return 0 if ok else 1
+
+
+def cmd_update(args):
+    """检查 GitHub 最新正式 Release（只检查，不下载、不替换文件）。"""
+    info = check_latest_release(force=getattr(args, "force", False))
+    print("当前版本 : %s" % APP_VERSION)
+    if not info.get("ok"):
+        print("检查失败 : %s" % (info.get("error") or "未知错误"))
+        return 1
+    print("最新版本 : %s" % (info.get("latest") or "(未知)"))
+    if info.get("available"):
+        print("可用更新 : 是%s" % (
+            "（%s）" % info["name"] if info.get("name") else ""))
+        print("下载页面 : %s" % info.get("url"))
+        if getattr(args, "open", False):
+            open_release_page()
+    else:
+        print("可用更新 : 否（已是最新）")
+    return 0
 
 
 def cmd_log(args):
@@ -3688,11 +3688,15 @@ def cmd_diagnose(args):
 
 
 def cmd_install(args):
-    return 0 if install_autostart() else 1
+    ok, msg = enable_autostart_service()
+    print(("已启用：" if ok else "启用失败：") + msg)
+    return 0 if ok else 1
 
 
 def cmd_uninstall(args):
-    return 0 if uninstall_autostart() else 1
+    ok, msg = disable_autostart_service()
+    print(("已关闭：" if ok else "关闭失败：") + msg)
+    return 0 if ok else 1
 
 
 def cmd_uninstaller(args):
@@ -3938,6 +3942,13 @@ def main():
     p_up.add_argument("--check", action="store_true",
                       help="只体检（守护版本 + 升级候选），不改动任何文件")
     p_up.set_defaults(func=cmd_upgrade)
+    p_update = sub.add_parser("update",
+                              help="检查 GitHub 最新 Release（只检查，不下载）")
+    p_update.add_argument("--force", action="store_true",
+                          help="跳过缓存，立即重新检查")
+    p_update.add_argument("--open", action="store_true",
+                          help="发现更新时用浏览器打开下载页面")
+    p_update.set_defaults(func=cmd_update)
     sub.add_parser("ui", help="打开图形管理界面").set_defaults(func=cmd_ui)
     p_login = sub.add_parser("login", help="立即登录")
     p_login.add_argument("--force", action="store_true", help="已在线也强制重登")
