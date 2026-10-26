@@ -3086,8 +3086,10 @@ def run_daemon(cfg, cred):
             # ---- 用户主动下线后的静默期：不自动登回 ----
             left = logout_pause_left() if pause_iv > 0 else 0
             if left:
-                if pause_logged != left:
-                    pause_logged = left
+                # 按“截止时刻”去重：剩多少秒每轮都在变，拿它比会每轮刷一条日志
+                deadline = int(time.time()) + left
+                if pause_logged != deadline:
+                    pause_logged = deadline
                     log.info("处于「手动下线」静默期（剩 %ds），不自动登录；"
                              "点界面「立即连接」或执行 login 可提前恢复",
                              left)

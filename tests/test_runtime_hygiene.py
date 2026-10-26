@@ -102,6 +102,17 @@ class TestDaemonHonoursLogoutPause(unittest.TestCase):
         # 第一段等待按 min(静默剩余, 检测周期) 走，不会一口气睡 120s
         self.assertEqual(replay.waits, [30, 20])
 
+    def test_pause_hint_is_logged_once_per_window(self):
+        # 静默期剩余秒数每轮都在变；提示必须按“截止时刻”去重，否则每 30s 刷一条
+        replay = DaemonReplay(commands=[None, None, None, "STOP"])
+        with mock.patch.object(cn, "logout_pause_left",
+                               side_effect=[120, 90, 60, 30]):
+            self.assertEqual(replay.run(), 0)
+        replay.client.login.assert_not_called()
+        hints = [c.args[0] for c in replay.log.info.call_args_list
+                 if c.args and "静默期" in str(c.args[0])]
+        self.assertEqual(len(hints), 1, hints)
+
 
 # ---------------- 验证码 / 短信 / CAS 拦截 ----------------
 
