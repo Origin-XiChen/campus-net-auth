@@ -22,7 +22,7 @@ class _Resp:
         return False
 
 
-def _payload(tag="v0.6.1", name="0.6.1", url=None):
+def _payload(tag="v0.6.2", name="0.6.2", url=None):
     return {
         "tag_name": tag,
         "name": name,
@@ -52,12 +52,12 @@ class TestReleaseCheck(unittest.TestCase):
         return cn.check_latest_release(), m
 
     def test_newer_release_available(self):
-        info, _ = self._check(_payload("v0.6.1"))
+        info, _ = self._check(_payload("v0.6.2"))
         self.assertTrue(info["ok"])
-        self.assertEqual(info["latest"], "0.6.1")
+        self.assertEqual(info["latest"], "0.6.2")
         self.assertTrue(info["available"])
-        self.assertEqual(info["name"], "0.6.1")
-        self.assertIn("/releases/tag/v0.6.1", info["url"])
+        self.assertEqual(info["name"], "0.6.2")
+        self.assertIn("/releases/tag/v0.6.2", info["url"])
         self.assertTrue(info["checked_at"])
 
     def test_same_version_not_available(self):
