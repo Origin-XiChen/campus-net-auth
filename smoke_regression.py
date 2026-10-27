@@ -247,8 +247,12 @@ def main():
 
     src_exe = os.path.join(ROOT, "dist", "CampusNetAuth.exe")
     if not os.path.exists(src_exe):
-        check("dist 交付 exe 存在", False, src_exe)
-        return 2
+        # 干净 clone 里本来就没有 dist（构建产物不入库），这不是回归。
+        # 旧行为是记一条 FAIL 并 return 2，导致“刚 clone 就跑冒烟”必红，
+        # 让人误以为代码坏了。现在改为 SKIP 提示。
+        rec("\n[SKIP] dist 交付 exe 不存在：本次跳过 exe 实跑段")
+        rec("       先跑 build_exe.bat 构建出 dist\\CampusNetAuth.exe 再测")
+        return 0
     VERIFY = os.path.join(tempfile.gettempdir(),
                           "cna_smoke_%d" % int(time.time()))
     os.makedirs(VERIFY, exist_ok=True)

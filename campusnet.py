@@ -131,8 +131,10 @@ _MEI_CLEANED = _cleanup_stale_mei()
 # 0.5.3 = 公网探测无结论时的认证阻塞与退避修复（PR#3）+ 登录页发现优先重定向（PR#2）
 #         + 状态文案不再把"探测无结论"误报成"网络不可达"
 # 0.6.0 = 自启/守护/界面合并为同一个 exe（不再释放 VBS 组件）+ Release 更新检查
-# 0.6.1 = 更新检查结果落盘（status/upgrade 新进程可读）+ 在线时自动重查
-#         + 界面透出失败原因与检查时间 + upgrade --check 显示远端最新版本
+# 0.6.1 = 运行时清理与可观测性（.old.exe 不再堆积、下线不再被守护立刻登回、
+#         验证码/短信/CAS 给出结论而不是无限重试、累计计数落盘、MAC 按网卡取、
+#         配置值校验、自启/升级相关日志措辞）
+#         + 更新检查结果落盘 / 在线自动补查 / 界面与 CLI 透出远端版本
 APP_VERSION = "0.6.1"
 GITHUB_REPO = "Origin-XiChen/campus-net-auth"
 GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
@@ -170,6 +172,10 @@ DEFAULT_CONFIG = {
     "verify_interval": 5,
     # 校外/断网退避等待期间的环境快探间隔（秒）：恢复时即时响应（不等完整退避）
     "recheck_interval": 30,
+    # 手动「下线」后的静默期（秒）：用户显式下线意味着"我现在不想联网"，
+    # 守护在这段时间内不自动登录（仍会监控网络与心跳），避免"刚下线就被登回"。
+    # 0 = 关闭；执行 login（界面「立即连接」/CLI）会立即清除静默期。
+    "logout_pause": 600,
     # 连通性检测目标（HTTP，避免 HTTPS 证书干扰）
     "detect_targets": [
         {"host": "www.msftconnecttest.com", "path": "/connecttest.txt",
@@ -689,9 +695,108 @@ def local_lan_ipv4(host):
                 pass
 
 
+class _IP_ADDR_STRING(ctypes.Structure):
+    pass
+
+
+_IP_ADDR_STRING._fields_ = [
+    ("Next", ctypes.POINTER(_IP_ADDR_STRING)),
+    ("IpAddress", ctypes.c_char * 16),
+    ("IpMask", ctypes.c_char * 16),
+    ("Context", wintypes.DWORD),
+]
+
+
+class _IP_ADAPTER_INFO(ctypes.Structure):
+    pass
+
+
+# 只声明到 IpAddressList 为止：GetAdaptersInfo 写进传入缓冲区，
+# 我们靠 Next 指针遍历，不读后面的字段，所以不需要完整结构体。
+_IP_ADAPTER_INFO._fields_ = [
+    ("Next", ctypes.POINTER(_IP_ADAPTER_INFO)),
+    ("ComboIndex", wintypes.DWORD),
+    ("AdapterName", ctypes.c_char * 260),
+    ("Description", ctypes.c_char * 132),
+    ("AddressLength", ctypes.c_uint),
+    ("Address", ctypes.c_ubyte * 8),
+    ("Index", wintypes.DWORD),
+    ("Type", ctypes.c_uint),
+    ("DhcpEnabled", ctypes.c_uint),
+    ("CurrentIpAddress", ctypes.POINTER(_IP_ADDR_STRING)),
+    ("IpAddressList", _IP_ADDR_STRING),
+]
+
+_ERROR_BUFFER_OVERFLOW = 111
+
+
+def _enum_ipv4_ifaces():
+    """枚举本机 IPv4 网卡 → [(ip, "aa-bb-cc-dd-ee-ff")]。
+
+    用 GetAdaptersInfo（iphlpapi，零依赖、IPv4-only 刚好是我们要的）：
+    无需管理员权限，也不用 COM/WMI。任何异常一律返回 []，调用方回退。
+    """
+    if os.name != "nt":
+        return []
+    out = []
+    try:
+        size = wintypes.ULONG(16 * 1024)
+        buf = ctypes.create_string_buffer(size.value)
+        fn = ctypes.windll.iphlpapi.GetAdaptersInfo
+        rc = fn(ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_INFO)),
+                ctypes.byref(size))
+        if rc == _ERROR_BUFFER_OVERFLOW:
+            buf = ctypes.create_string_buffer(size.value)
+            rc = fn(ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_INFO)),
+                    ctypes.byref(size))
+        if rc != 0:
+            return []
+        node = ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_INFO))
+        guard = 0
+        while node and guard < 64:
+            guard += 1
+            info = node.contents
+            n = int(info.AddressLength)
+            mac = ""
+            if n >= 6:
+                mac = "-".join("%02x" % info.Address[i] for i in range(6))
+            ip = info.IpAddressList.IpAddress.decode("ascii", "ignore").strip()
+            # 全 0 的 MAC/地址是未连接的虚拟网卡，跳过
+            if (mac and mac != "00-00-00-00-00-00"
+                    and ip and ip != "0.0.0.0"):
+                out.append((ip, mac))
+            node = info.Next
+    except Exception:
+        return []
+    return out
+
+
+def pick_mac_for_ip(ifaces, ip):
+    """从 [(ip, mac)] 里挑出与 ip 完全一致的那张网卡的 MAC（纯函数）。
+
+    单独拆出来是为了可单测：ctypes 枚举部分在无网卡/被拦截的环境里只能
+    返回空列表，真正的选择规则不该依赖那个环境。
+    """
+    if not ip:
+        return ""
+    for entry_ip, mac in ifaces or ():
+        if entry_ip == ip and mac:
+            return mac
+    return ""
+
+
+def local_mac_for_ip(ip):
+    """面向某块网卡（由本机 IPv4 指定）的 MAC；取不到返回 ""。"""
+    return pick_mac_for_ip(_enum_ipv4_ifaces(), ip)
+
+
 def local_mac_text():
-    """本机 MAC（aa-bb-cc-dd-ee-ff 小写带横线，与门户页面同口径）；
-    拿不到真实网卡地址（uuid 退回随机数）时返回 ""。"""
+    """本机 MAC 的**兜底**来源（aa-bb-cc-dd-ee-ff）。
+
+    uuid.getnode() 取的是“第一块网卡”，可能根本不是走校园网的那块（实测：
+    返回 74-3a-f4-ca-f3-ec，而 Wi-Fi 网卡是 74-3a-f4-ca-f3-eb）。因此它只能
+    当候选：优先用 local_mac_for_ip（按本机 IPv4 反查同一块网卡）。
+    """
     try:
         node = uuid.getnode()
     except Exception:
@@ -840,7 +945,8 @@ class PortalClient:
         if not ip:
             return ""
         mac = (str(hints.get("wlanparameter") or "").strip()
-               or local_mac_text())
+               or local_mac_for_ip(ip)     # 走校园网那块网卡的 MAC（首选）
+               or local_mac_text())        # 兜底：uuid.getnode()
         fields = [("wlanuserip", ip), ("wlanacname", acname),
                   ("nasip", nasip)]
         if mac:
@@ -1098,7 +1204,31 @@ class PortalClient:
                 if code in msg:
                     res["_hint"] = hint
                     break
+            blocked = self.auth_blocked_reason(query_string)
+            if blocked:
+                res["_blocked"] = blocked
+                res.setdefault("_hint", blocked)
         return res
+
+    def auth_blocked_reason(self, query_string=""):
+        """门户口径上“账号密码自动认证不可能成功”的原因；可自动认证返回 ""。
+
+        只会在这条路径（登录已失败）里问一次 pageInfo，正常登录不多打请求。
+        三个来源都是门户自己 pageInfo 里的开关：
+          * isToCasPage   ：已改成 CAS/统一身份认证（跳转登录页）
+          * isCheckSmsAuth：登录要短信二次验证
+          * validCodeUrl  ：登录页带验证码（JS 里 validCodeUrl 非空才显示）
+        """
+        info = self.page_info(query_string)
+        if not isinstance(info, dict):
+            return ""
+        if str(info.get("isToCasPage", "")).lower() == "true":
+            return "门户已改为 CAS/统一身份认证登录，无法用账号密码自动认证"
+        if str(info.get("isCheckSmsAuth", "")).lower() == "true":
+            return "门户要求短信二次验证，无法自动认证"
+        if str(info.get("validCodeUrl") or "").strip():
+            return "门户登录页已启用验证码，无法自动认证"
+        return ""
 
     def _auto_service(self, query_string="", info=None):
         info = (self.page_info(query_string) if info is None else info) or {}
@@ -1129,7 +1259,8 @@ def _sanitize_config(cfg):
     interval 为负数导致 select 抛错空转等）。"""
     for k in ("portal_port", "interval", "retry_interval", "max_interval",
               "offline_interval", "timeout", "probe_timeout",
-              "keepalive_interval", "verify_interval", "recheck_interval"):
+              "keepalive_interval", "verify_interval", "recheck_interval",
+              "logout_pause"):
         try:
             cfg[k] = int(cfg[k])
         except (TypeError, ValueError):
@@ -1143,6 +1274,8 @@ def _sanitize_config(cfg):
     cfg["keepalive_interval"] = max(30, cfg["keepalive_interval"])
     cfg["verify_interval"] = max(2, cfg["verify_interval"])
     cfg["recheck_interval"] = max(5, cfg["recheck_interval"])
+    # 0 = 关闭静默期；上限 24h，防止手写配置把守护“永久禁用”
+    cfg["logout_pause"] = min(max(0, cfg["logout_pause"]), 86400)
     targets = cfg.get("detect_targets")
     if not isinstance(targets, list):
         targets = None  # 非列表（如字符串 "x" 是 truthy）一律按缺失处理
@@ -1154,6 +1287,29 @@ def _sanitize_config(cfg):
             json.dumps(DEFAULT_CONFIG["detect_targets"]))
     if not isinstance(cfg.get("portal_host"), str) or not cfg["portal_host"]:
         cfg["portal_host"] = DEFAULT_CONFIG["portal_host"]
+    # 账号：去空白，非字符串一律置空（避免 None 拼进登录表单）
+    user = cfg.get("username")
+    cfg["username"] = user.strip() if isinstance(user, str) else ""
+    # 服务名：只认门户口径的四个值（大小写不敏感），写错就回落 default 而不是
+    # 原样 POST 给门户（写错时门户只会回一句“未知服务”，很难自査）。
+    svc = cfg.get("service")
+    svc = svc.strip() if isinstance(svc, str) else ""
+    if svc.lower() in ("default", "auto"):
+        cfg["service"] = svc.lower()
+    elif svc.upper() in ("DX", "LT", "YD"):
+        cfg["service"] = svc.upper()
+    else:
+        if svc:
+            log.warning("配置里的 service=%r 不是合法值，已回落 default"
+                        "（可选：default / DX / LT / YD / auto）", svc)
+        cfg["service"] = "default"
+    # 接口前缀：必须以 / 开头、不以 / 结尾（否则 url() 会拼出
+    # http://host:80eportal/... 这种发不出去的地址，而调用方看不出原因）
+    base = cfg.get("portal_base")
+    base = base.strip() if isinstance(base, str) else ""
+    if not base.startswith("/"):
+        base = "/" + base
+    cfg["portal_base"] = base.rstrip("/") or "/eportal"
     # 登录页兜底参数：只保留字符串型的已知键，其余丢弃，避免脏配置拼出怪 URL。
     # 非字典或空字典（含 false / null / {}）→ 关闭兜底；部分给出时按默认值补齐；
     # wlanuserip / wlanparameter 留空表示"用本机当前地址自动填充"。
@@ -1285,6 +1441,66 @@ def clear_session():
         for k in ("userIndex", "loginTime", "last_error"):
             st.pop(k, None)
         save_state(st)
+
+
+# ---- “手动下线”静默期 ----
+# 用户显式下线（界面「下线」/CLI logout）后，守护不得马上把他登回去：
+# 旧行为是 30s 一轮发现未认证就重登（实测 0.5.4/0.6.0 均 14~36s），
+# “下线”按钮形同虚设。静默期存 state.json（跨守护重启生效），
+# 执行 login（界面「立即连接」/CLI）会立即清除。
+LOGOUT_PAUSE_KEY = "logout_pause_until"
+
+
+def set_logout_pause(seconds):
+    """设置/清除手动下线静默期（秒）。seconds<=0 表示清除。"""
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        with _state_lock():
+            st = load_state()
+            if st.pop(LOGOUT_PAUSE_KEY, None) is not None:
+                save_state(st)
+        return 0
+    until = int(time.time()) + seconds
+    update_state({LOGOUT_PAUSE_KEY: until})
+    return until
+
+
+def logout_pause_left():
+    """手动下线静默期剩余秒数（已过期/未设置返回 0）。"""
+    try:
+        until = int(load_state().get(LOGOUT_PAUSE_KEY) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, until - int(time.time()))
+
+
+# ---- 跨进程累计计数（守护重启不归零）----
+_STATS_WRITE_AT = 0.0
+
+
+def save_stats_totals(totals, min_gap=60.0):
+    """把“跨进程累计计数”写进 state.json；默认 60s 内最多写一次。
+
+    为什么需要：`stats` 是进程内字典，守护每重启一次就归零，心跳里的
+    “累计登录成功=0”会让人误以为从来没认证过（真实排查中误导过两次）。
+    限流是为了登录失败风暴时不把磁盘写爆。
+    """
+    global _STATS_WRITE_AT
+    now = time.time()
+    if min_gap > 0 and now - _STATS_WRITE_AT < min_gap:
+        return False
+    _STATS_WRITE_AT = now
+    clean = {}
+    for k, v in (totals or {}).items():
+        try:
+            clean[str(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    update_state({"stats": clean})
+    return True
 
 
 # 状态事件类型 → 展示文案（供 UI 即时状态条复用）
@@ -2404,13 +2620,26 @@ def _kill_if_own(pid, what="进程"):
 
     返回是否已确认该进程不再存在。这条守卫防的是 PID 复用误杀：pid 文件里的
     陈旧 PID 可能已属于别人的进程，盲杀等于随机杀人。
+
+    ⚠️ 三种结果必须分开说：
+      * 确认不是本程序（False）—— 真的可能是 PID 被复用，要用户能看懂；
+      * 无法判定（None，权限不足/进程已退出）—— 不能诬赖成“PID 被复用”，
+        否则日志会误导排查方向（实测踩过：升级后 stop 报这句，其实是
+        取不到映像路径）。
     """
     if not _proc_alive(pid):
         return True
-    if _own_exe_path() is not None and _proc_is_own(pid) is not True:
-        log.warning("拒绝终止%s PID=%s：映像不属于本程序（PID 被复用？）",
-                    what, pid)
-        return False
+    own = _own_exe_path()
+    if own is not None:
+        mine = _proc_is_own(pid)
+        if mine is False:
+            log.warning("拒绝终止%s PID=%s：映像不属于本程序（PID 被复用？）",
+                        what, pid)
+            return False
+        if mine is None:
+            # 取不到映像路径（权限/已退出）——安全起見不杀，但不要误导
+            log.debug("跳过终止%s PID=%s：无法确认进程归属", what, pid)
+            return False
     return _kill_pid(pid)
 
 
@@ -2663,6 +2892,27 @@ def run_daemon(cfg, cred):
     stats = {"loops": 0, "login_ok": 0, "login_fail": 0,
              "reconnects": 0, "state_flips": 0, "keepalive_ok": 0,
              "stale_recover": 0}
+    # 累计计数落盘：stats 是本进程计数，守护每重启一次就归零，心跳里的
+    # “累计登录成功=0”会让人误以为从未认证过（实测误导过排查）。
+    # totals 是跨进程累计，只记“结果类”事件。
+    _TOTAL_KEYS = ("login_ok", "login_fail", "reconnects", "stale_recover")
+    try:
+        _saved = load_state().get("stats")
+        totals = {k: int((_saved or {}).get(k) or 0) for k in _TOTAL_KEYS}
+    except (TypeError, ValueError):
+        totals = {k: 0 for k in _TOTAL_KEYS}
+    def _bump(key, n=1):
+        """同时记本进程与跨进程累计（写盘限流 60s，避免登录风暴刷盘）。"""
+        stats[key] = stats.get(key, 0) + n
+        totals[key] = totals.get(key, 0) + n
+        try:
+            save_stats_totals(totals)
+        except Exception:
+            pass
+
+    pause_iv = int(cfg.get("logout_pause", 600))
+    pause_logged = 0          # 已提示过的静默期截止时间（避免每轮刷屏）
+    blocked_reason = ""       # 门户侧要求验证码/短信/CAS 时的结论（空=无）
     last_info = None  # 上次登录成功的 (IP, 服务)，用于检测网络身份变化
     last_heartbeat = 0.0
     HB_INTERVAL = 300  # 心跳日志节流：每 5 分钟一条
@@ -2695,8 +2945,10 @@ def run_daemon(cfg, cred):
         now = time.time()
         if now - last_heartbeat >= HB_INTERVAL:
             last_heartbeat = now
-            log.info("存活心跳 | 已运行 %s | 在线 | 累计登录成功=%d 失败=%d",
+            log.info("存活心跳 | 已运行 %s | 在线 | 累计登录成功=%d 失败=%d"
+                     "（本次运行 +%d/+%d）",
                      _fmt_uptime(now - started_at),
+                     totals["login_ok"], totals["login_fail"],
                      stats["login_ok"], stats["login_fail"])
 
     import select as _select
@@ -2892,12 +3144,27 @@ def run_daemon(cfg, cred):
                         break
                 continue
 
+            # ---- 用户主动下线后的静默期：不自动登回 ----
+            left = logout_pause_left() if pause_iv > 0 else 0
+            if left:
+                # 按“截止时刻”去重：剩多少秒每轮都在变，拿它比会每轮刷一条日志
+                deadline = int(time.time()) + left
+                if pause_logged != deadline:
+                    pause_logged = deadline
+                    log.info("处于「手动下线」静默期（剩 %ds），不自动登录；"
+                             "点界面「立即连接」或执行 login 可提前恢复",
+                             left)
+                if _wait(min(left, interval)) == "STOP":
+                    return 0
+                continue
+            pause_logged = 0
+
             log.info("检测到未认证，开始登录…")
             res = client.login(username, cred, login_page=login_page)
             if res.get("result") == "success":
-                stats["login_ok"] += 1
+                _bump("login_ok")
                 if fail_streak:
-                    stats["reconnects"] += 1
+                    _bump("reconnects")
                     log.info("断线自动重连成功 ✓（累计自动重连 %d 次）",
                              stats["reconnects"])
                 fail_streak = 0
@@ -2961,11 +3228,30 @@ def run_daemon(cfg, cred):
                 # 复核通过：清空残留会话自愈计数（下次异常可再提醒一次）
                 stale_streak = 0
                 stale_notified = False
+                blocked_reason = ""
                 if _wait(interval) == "STOP":
                     return 0
             else:
-                stats["login_fail"] += 1
+                _bump("login_fail")
                 fail_streak += 1
+                # 门户要求验证码/短信/CAS：账号密码自动认证不可能成功，别让它
+                # 按 30s→600s 无休止地敲下去，也不要每轮都说一次。
+                blocked = str(res.get("_blocked") or "")
+                if blocked:
+                    if blocked != blocked_reason:
+                        blocked_reason = blocked
+                        log.error("无法自动认证：%s", blocked)
+                        record_event("blocked", "无法自动认证：%s" % blocked)
+                        update_state({"last_error": {
+                            "t": int(time.time()), "msg": blocked}})
+                        notify_system("校园网需要人工认证", blocked)
+                    wait = max(max_interval, 1800)
+                    log.error("按门户改造处理：%ds 后再试一次（其间不会反复提交"
+                              "凭据）", wait)
+                    if _wait(wait) == "STOP":
+                        return 0
+                    continue
+                blocked_reason = ""
                 msg = res.get("message")
                 msg = str(msg) if msg else ""
                 hint = res.get("_hint", "")
@@ -3469,6 +3755,11 @@ def cmd_setup(args):
 
 def cmd_login(args):
     cfg = load_config()
+    # 显式登录（界面「立即连接」/CLI login）= 用户现在就要联网，
+    # 立刻解除“手动下线”静默期，否则守护会继续按静默期拦住后续自动重连。
+    if logout_pause_left():
+        set_logout_pause(0)
+        log.info("已解除手动下线静默期")
     cred = CredentialStore().load()
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码，请先运行: campusnet.py setup")
@@ -3584,6 +3875,10 @@ def cmd_status(args):
               % (hints["wlanacname"], hints["nasip"]))
     else:
         print("登录页兜底: 未配置")
+    left = logout_pause_left()
+    if left:
+        print("下线静默 : 剩余 %ds（守护不会自动登回；「立即连接」或 login 可恢复）"
+              % left)
     if loc:
         print("登录页   : %s" % loc[:160])
     if online:
@@ -3698,12 +3993,28 @@ def cmd_logout(args):
 
     steps = []  # 记录各方式失败原因，便于排查
 
+    def _after_logout(how):
+        """下线成功后的统一收尾：清会话 + 进入“手动下线”静默期。
+
+        不设静默期的话，守护 30s 内就会把你登回去（实测 14~36s），
+        “下线”按钮等于没用。静默期长度取 config.json 的 logout_pause
+        （默认 600s，0=关闭）；点「立即连接」或执行 login 会立刻解除。
+        """
+        clear_session()
+        pause = int(cfg.get("logout_pause", 600) or 0)
+        if pause > 0:
+            set_logout_pause(pause)
+            log.info("已进入手动下线静默期 %d 分钟：守护不会自动登回"
+                     "（「立即连接」或 login 可提前恢复）", max(1, pause // 60))
+        else:
+            log.info("提示：logout_pause=0，守护可能很快自动重新登录")
+
     # 1) 持久化的 userIndex（守护每次登录都会写入 state.json）
     ui = load_state().get("userIndex")
     r = by_index(ui)
     if r is True:
-        clear_session()
         log.info("已下线（userIndex 方式）")
+        _after_logout("userIndex")
         return 0
     if r is not True:
         steps.append("userIndex 方式: " + safe_message(r))
@@ -3713,8 +4024,8 @@ def cmd_logout(args):
     if isinstance(info, dict) and info.get("userIndex"):
         r = by_index(info["userIndex"])
         if r is True:
-            clear_session()
             log.info("已下线（会话方式）")
+            _after_logout("session")
             return 0
         if r is not True:
             steps.append("会话方式: " + safe_message(r))
@@ -3729,8 +4040,8 @@ def cmd_logout(args):
     if username and cred:
         res = client.logout(force_by_cred=True, username=username, password=cred)
         if isinstance(res, dict) and str(res.get("result")).lower() == "success":
-            clear_session()
             log.info("已下线（凭据方式）")
+            _after_logout("credential")
             return 0
         steps.append("凭据方式: " + safe_message(res))
 
@@ -4048,6 +4359,13 @@ def main():
 
     cfg = load_config()
     setup_logger(to_console=not is_daemon, level=cfg.get("log_level", "INFO"))
+
+    # 清理上次就地升级留下的 .old.exe（18+ MB）。旧版只有 docstring 写了
+    # “下次启动自动删”，实际从未调用 → 备份文件永久堆在程序目录（实测
+    # 装完 4 天后仍在，且它本身就是一份可执行副本，杀软误报时会被当成
+    # “另一份程序”）。放在日志初始化之后才能把结果写进日志。
+    if getattr(sys, "frozen", False):
+        cleanup_upgrade_backup()
 
     if is_daemon:
         hide_console()  # 手动从 cmd 前台运行 daemon 时共享控制台，不会误隐藏

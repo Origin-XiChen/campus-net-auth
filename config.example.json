@@ -13,6 +13,7 @@
   "keepalive_interval": 300,
   "verify_interval": 5,
   "recheck_interval": 30,
+  "logout_pause": 600,
   "detect_targets": [
     {
       "host": "www.msftconnecttest.com",

@@ -24,7 +24,7 @@ class _Resp:
         return False
 
 
-def _payload(tag="v0.6.1", name="0.6.1", url=None):
+def _payload(tag="v0.6.2", name="0.6.2", url=None):
     return {
         "tag_name": tag,
         "name": name,

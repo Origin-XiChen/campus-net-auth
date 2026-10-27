@@ -528,8 +528,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/connect":
                 self._connect(data)
             elif path == "/api/logout":
-                self._json({"ok": True,
-                            "rc": cn.cmd_logout(type("_A", (), {})())})
+                rc = cn.cmd_logout(type("_A", (), {})())
+                # 带上“手动下线静默期”剩余秒数：前端据此提示“不会马上被登回”，
+                # 否则用户会以为下线按钮没生效（旧版 30s 内自动登回）。
+                self._json({"ok": True, "rc": rc,
+                            "pause": cn.logout_pause_left()})
             elif path == "/api/daemon/start":
                 self._json({"ok": cn.start_daemon()})
             elif path == "/api/daemon/stop":
@@ -1726,8 +1729,14 @@ $('#btnConnect').onclick = async () => {
   load();
 };
 
-$('#btnLogout').onclick = async () => { await post('/api/logout'); toast('已下线'); load(); };
-$('#btnLogout2').onclick = async () => { await post('/api/logout'); toast('已下线'); load(); };
+const doLogout = async () => {
+  const r = await post('/api/logout');
+  const m = Math.round(((r && r.pause) || 0) / 60);
+  toast(m > 0 ? (`已下线，${m} 分钟内不会自动重连（点「立即连接」可恢复）`) : '已下线');
+  load();
+};
+$('#btnLogout').onclick = doLogout;
+$('#btnLogout2').onclick = doLogout;
 $('#btnRefresh').onclick = () => load();
 $('#btnCheck').onclick = async () => {
   const btn = $('#btnCheck');
