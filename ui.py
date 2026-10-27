@@ -1671,7 +1671,10 @@ class App(tk.Tk):
         if not cred:
             return {"result": "fail", "message": "尚未保存密码"}
         client = cn.PortalClient(cfg)
-        return client.login(cfg.get("username", ""), cred)
+        res = client.login(cfg.get("username", ""), cred)
+        if isinstance(res, dict) and res.get("result") == "success":
+            cn.clear_logout_pause()   # 用户手动登录 = 不再处于"手动下线"
+        return res
 
     def _on_login_result(self, res):
         if isinstance(res, dict) and res.get("result") == "success":

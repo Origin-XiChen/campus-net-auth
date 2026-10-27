@@ -681,11 +681,15 @@ class Handler(BaseHTTPRequestHandler):
         client = cn.PortalClient(cfg)
         online, _ = client.check_online()
         if online:
+            cn.clear_logout_pause()  # 已在线 = 不再处于"手动下线"状态
             _wake_daemon()  # 告知守护：已在线，立即复核一轮
             self._json({"ok": True, "result": "already_online"})
             return
         res = client.login(cfg["username"], cred)
         if res.get("result") == "success":
+            # 「立即连接」= 用户现在就要联网：不清静默期的话，随后一掉线
+            # 守护会干等到静默期结束（最多 10 分钟）才重连
+            cn.clear_logout_pause()
             _wake_daemon()  # 登录成功 → 唤醒守护即时同步状态
             if res.get("userIndex"):
                 cn.update_state({"userIndex": res["userIndex"],
@@ -1631,6 +1635,7 @@ async function load(){
   if (evts.length){
     const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
                      login_ok:'ok', login_fail:'err', kickout:'warn',
+                     blocked:'err',
                      portal_fix:'warn', daemon_refresh:'warn', upgrade:'ok'};
     const EVT_MARK = {err:'✕', portal_fix:'⚠', daemon_refresh:'↻', upgrade:'↑'};
     const items = evts.slice(-3).reverse().map(ev => {

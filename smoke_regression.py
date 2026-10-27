@@ -249,9 +249,14 @@ def main():
     if not os.path.exists(src_exe):
         # 干净 clone 里本来就没有 dist（构建产物不入库），这不是回归。
         # 旧行为是记一条 FAIL 并 return 2，导致“刚 clone 就跑冒烟”必红，
-        # 让人误以为代码坏了。现在改为 SKIP 提示。
+        # 让人误以为代码坏了。现在改为 SKIP 提示（报告照写，否则会留下
+        # 上一次运行的旧 _smoke_result.txt，比没有报告更容易误读）。
         rec("\n[SKIP] dist 交付 exe 不存在：本次跳过 exe 实跑段")
         rec("       先跑 build_exe.bat 构建出 dist\\CampusNetAuth.exe 再测")
+        with open(os.path.join(ROOT, "_smoke_result.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("\n".join(REPORT))
+        rec("报告: _smoke_result.txt")
         return 0
     VERIFY = os.path.join(tempfile.gettempdir(),
                           "cna_smoke_%d" % int(time.time()))

@@ -1477,6 +1477,20 @@ def logout_pause_left():
     return max(0, until - int(time.time()))
 
 
+def clear_logout_pause():
+    """解除手动下线静默期（用户显式要求联网时调用）。返回是否真的清过。
+
+    所有"用户主动要联网"的入口都要走这里：CLI login、界面「立即连接」、
+    tkinter 回退界面的登录按钮。少了任何一处，用户下线后手动连上、随后一
+    掉线，守护就会因为静默期还在而不自动重连（最多 10 分钟）。
+    """
+    if not logout_pause_left():
+        return False
+    set_logout_pause(0)
+    log.info("已解除手动下线静默期")
+    return True
+
+
 # ---- 跨进程累计计数（守护重启不归零）----
 _STATS_WRITE_AT = 0.0
 
@@ -3063,7 +3077,11 @@ def run_daemon(cfg, cred):
                 if online is True and prev_online is False:
                     record_event("restored", "网络已恢复在线")
                 elif online is False and prev_online is True:
-                    record_event("lost", "检测到未认证，正在自动重连…")
+                    # 手动下线的静默期内不要记成"正在自动重连"——那是假消息
+                    if logout_pause_left():
+                        record_event("offline", "手动下线中，静默期内不会自动重连")
+                    else:
+                        record_event("lost", "检测到未认证，正在自动重连…")
                 elif online is None and prev_online is not None:
                     record_event("offline", "公网探测无结论，等待复核门户状态…")
                 prev_online = online
@@ -3755,11 +3773,10 @@ def cmd_setup(args):
 
 def cmd_login(args):
     cfg = load_config()
-    # 显式登录（界面「立即连接」/CLI login）= 用户现在就要联网，
-    # 立刻解除“手动下线”静默期，否则守护会继续按静默期拦住后续自动重连。
-    if logout_pause_left():
-        set_logout_pause(0)
-        log.info("已解除手动下线静默期")
+    # 显式登录（CLI login）= 用户现在就要联网 → 立刻解除“手动下线”静默期，
+    # 否则守护会继续按静默期拦住后续自动重连（界面「立即连接」走
+    # clear_logout_pause()，路径不同但语义一致）。
+    clear_logout_pause()
     cred = CredentialStore().load()
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码，请先运行: campusnet.py setup")
@@ -3813,6 +3830,13 @@ def cmd_login(args):
 def cmd_once(args):
     """单次检测：离线才登录（适合任务计划定时调用）"""
     cfg = load_config()
+    # 任务计划场景必须"尊重"用户的手动下线：把刚下线的连接又登回去，
+    # 会让「下线」在两个入口之间自相矛盾。显式要联网请用 login。
+    left = logout_pause_left()
+    if left:
+        log.info("处于「手动下线」静默期（剩 %ds），本次跳过；执行 login 可提前恢复",
+                 left)
+        return 0
     cred = CredentialStore().load()
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码")
@@ -3993,7 +4017,7 @@ def cmd_logout(args):
 
     steps = []  # 记录各方式失败原因，便于排查
 
-    def _after_logout(how):
+    def _after_logout():
         """下线成功后的统一收尾：清会话 + 进入“手动下线”静默期。
 
         不设静默期的话，守护 30s 内就会把你登回去（实测 14~36s），
@@ -4014,7 +4038,7 @@ def cmd_logout(args):
     r = by_index(ui)
     if r is True:
         log.info("已下线（userIndex 方式）")
-        _after_logout("userIndex")
+        _after_logout()
         return 0
     if r is not True:
         steps.append("userIndex 方式: " + safe_message(r))
@@ -4025,7 +4049,7 @@ def cmd_logout(args):
         r = by_index(info["userIndex"])
         if r is True:
             log.info("已下线（会话方式）")
-            _after_logout("session")
+            _after_logout()
             return 0
         if r is not True:
             steps.append("会话方式: " + safe_message(r))
@@ -4041,7 +4065,7 @@ def cmd_logout(args):
         res = client.logout(force_by_cred=True, username=username, password=cred)
         if isinstance(res, dict) and str(res.get("result")).lower() == "success":
             log.info("已下线（凭据方式）")
-            _after_logout("credential")
+            _after_logout()
             return 0
         steps.append("凭据方式: " + safe_message(res))
 

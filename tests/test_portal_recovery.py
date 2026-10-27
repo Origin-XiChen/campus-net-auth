@@ -39,6 +39,7 @@ class DaemonReplay:
         self.log = mock.Mock()
         self.logout = mock.Mock(return_value=(True, "TEST-ONLY"))
         self.notifications = mock.Mock()
+        self.events = mock.Mock()
         self.outcome = None
 
     def probe(self):
@@ -71,7 +72,7 @@ class DaemonReplay:
                 "_start_addr_change_watcher": mock.Mock(),
                 "update_state": mock.Mock(), "save_state": mock.Mock(),
                 "load_state": mock.Mock(return_value={}),
-                "record_event": mock.Mock(), "self_exe_path": mock.Mock(return_value="TEST-EXE"),
+                "record_event": self.events, "self_exe_path": mock.Mock(return_value="TEST-EXE"),
                 "logout_stale_session": self.logout,
                 "notify_system": self.notifications, "log": self.log,
                 "http_request": mock.Mock(side_effect=AssertionError("unexpected HTTP")),

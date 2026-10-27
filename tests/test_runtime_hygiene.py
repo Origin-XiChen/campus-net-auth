@@ -60,6 +60,25 @@ class TestLogoutPause(_StateDirMixin):
         cn.set_logout_pause(0)
         self.assertEqual(cn.logout_pause_left(), 0)
 
+    def test_clear_helper_is_idempotent(self):
+        """所有"用户要联网"入口共用的解除函数：清一次返回 True，再清 False。"""
+        self.assertFalse(cn.clear_logout_pause())      # 本来就没静默期
+        cn.set_logout_pause(300)
+        self.assertTrue(cn.clear_logout_pause())
+        self.assertEqual(cn.logout_pause_left(), 0)
+        self.assertFalse(cn.clear_logout_pause())
+
+    def test_once_respects_pause(self):
+        """任务计划里的 once 必须尊重手动下线：跳过登录、不动静默期。"""
+        cn.set_logout_pause(300)
+        with mock.patch.object(cn, "load_config",
+                               return_value=dict(cn.DEFAULT_CONFIG,
+                                                 username="u")), \
+                mock.patch.object(cn, "PortalClient") as client:
+            self.assertEqual(cn.cmd_once(mock.Mock()), 0)
+        client.assert_not_called()
+        self.assertGreater(cn.logout_pause_left(), 0)
+
     def test_expired_pause_is_zero(self):
         cn.update_state({cn.LOGOUT_PAUSE_KEY: 1})     # 1970 年就过期了
         self.assertEqual(cn.logout_pause_left(), 0)
@@ -112,6 +131,15 @@ class TestDaemonHonoursLogoutPause(unittest.TestCase):
         hints = [c.args[0] for c in replay.log.info.call_args_list
                  if c.args and "静默期" in str(c.args[0])]
         self.assertEqual(len(hints), 1, hints)
+
+    def test_manual_logout_is_not_reported_as_reconnect(self):
+        """先在线再掉线，且处于静默期：事件应说明是手动下线，不是"正在自动重连"。"""
+        replay = DaemonReplay(online=[True, False], commands=[None, None, "STOP"])
+        with mock.patch.object(cn, "logout_pause_left", return_value=120):
+            self.assertEqual(replay.run(), 0)
+        kinds = [c.args for c in replay.events.call_args_list]
+        self.assertIn(("offline", "手动下线中，静默期内不会自动重连"), kinds)
+        self.assertNotIn(("lost", "检测到未认证，正在自动重连…"), kinds)
 
 
 # ---------------- 验证码 / 短信 / CAS 拦截 ----------------
