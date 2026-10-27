@@ -245,6 +245,27 @@ def _start_update_check_once() -> None:
     threading.Thread(target=_bg, daemon=True).start()
 
 
+def _start_update_retry_loop() -> None:
+    """自动补查：上次失败超 5 分钟、成功超 6 小时，且当前**在线**时重查。
+
+    启动时那次检查常在未认证阶段（GitHub 不可达）必然失败；没有这个循环，
+    用户认证成功后卡片会一直停在「检查失败」，只能手动点。离线时不发请求，
+    避免反复打 GitHub 匿名 API；网络恢复后 60s 内自动补上。
+    """
+
+    def _bg():
+        while True:
+            time.sleep(60)
+            try:
+                due, _info = cn.update_check_due()
+                if due and _PROBE_CACHE["online"] is True:
+                    cn.check_latest_release(force=True)
+            except Exception as e:  # noqa: BLE001 自动重查失败不影响界面
+                cn.log.debug("自动检查 Release 失败: %r", e)
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
 def _task_daemon_refresh() -> str:
     """手动"重启守护以应用更新"：强制体检 + 必要时重启，返回可读结论。"""
     before = cn.daemon_info()[1]
@@ -717,6 +738,7 @@ def serve(port: int = 0, host: str = "127.0.0.1"):
     # （用户只会"换 exe"，不会知道要去重启）。延迟几秒避开首屏。
     _start_daemon_check_once()
     _start_update_check_once()
+    _start_update_retry_loop()
     return srv, "http://127.0.0.1:%d/?token=%s" % (port, _AUTH_TOKEN)
 
 
@@ -1323,6 +1345,13 @@ const fmtClock = (ts) => {
   const p = n => String(n).padStart(2, '0');
   return p(d.getHours()) + ':' + p(d.getMinutes());
 };
+// unix 秒时间戳 -> "MM-DD HH:MM"（用于"上次检查更新"时间）
+const fmtStamp = (ts) => {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes());
+};
 
 let toastTimer = null;
 // 最近一次 /api/status 的原始结果：按钮回调（如升级确认框）要用到其中的
@@ -1496,11 +1525,21 @@ async function load(){
     svcEl.textContent = '仅当前会话'; svcEl.className = 'comp-state';
   }
 
-  // 远程版本检查（只读状态缓存；实际请求由启动后自动检查或按钮触发）
+  // 远程版本检查（只读状态缓存；实际请求由启动后自动检查 / 在线自动补查 / 按钮触发）
   const upd = st.update || {};
   const upState = $('#updateState');
-  $('#updateSub').textContent = '当前 v' + (st.app_version || '')
-    + ' · 自动检查 GitHub Release（只检查，不下载）';
+  const updWhen = upd.checked_at ? fmtStamp(upd.checked_at) : '';
+  upState.title = upd.error ? ('上次检查失败：' + upd.error) : '';
+  if (!upd.ok && upd.checked_at){
+    // 失败原因写进副标题：只写"检查失败"时用户无从判断是没网、限流还是别的问题
+    const reason = String(upd.error || '网络不可用').split('\n')[0].slice(0, 60);
+    $('#updateSub').textContent = '当前 v' + (st.app_version || '')
+      + ' · 上次检查 ' + updWhen + ' 失败：' + reason;
+  } else {
+    $('#updateSub').textContent = '当前 v' + (st.app_version || '')
+      + (updWhen ? ' · 上次检查 ' + updWhen : '')
+      + ' · 自动检查 GitHub Release（只检查，不下载）';
+  }
   if (upd.available){
     upState.textContent = 'v' + upd.latest + ' 可用';
     upState.className = 'comp-state warn';

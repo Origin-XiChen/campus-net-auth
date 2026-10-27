@@ -131,7 +131,9 @@ _MEI_CLEANED = _cleanup_stale_mei()
 # 0.5.3 = 公网探测无结论时的认证阻塞与退避修复（PR#3）+ 登录页发现优先重定向（PR#2）
 #         + 状态文案不再把"探测无结论"误报成"网络不可达"
 # 0.6.0 = 自启/守护/界面合并为同一个 exe（不再释放 VBS 组件）+ Release 更新检查
-APP_VERSION = "0.6.0"
+# 0.6.1 = 更新检查结果落盘（status/upgrade 新进程可读）+ 在线时自动重查
+#         + 界面透出失败原因与检查时间 + upgrade --check 显示远端最新版本
+APP_VERSION = "0.6.1"
 GITHUB_REPO = "Origin-XiChen/campus-net-auth"
 GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
 GITHUB_API_LATEST = ("https://api.github.com/repos/%s/releases/latest"
@@ -1595,6 +1597,8 @@ def _ver_key(text):
 # ---- GitHub Release 更新检查（只检查，不下载、不替换文件）----
 _UPDATE_CACHE = {"t": 0.0, "data": None}
 _UPDATE_LOCK = threading.Lock()
+_UPDATE_FETCH_LOCK = threading.Lock()   # 同一时刻只允许一个网络请求在跑
+UPDATE_STATE_KEY = "update_last"        # state.json 里保存最近一次检查结果
 
 
 def _release_version(tag):
@@ -1617,11 +1621,62 @@ def _default_update_info():
     }
 
 
+def _fmt_checked_at(ts):
+    """把 checked_at 时间戳格式化为 "MM-DD HH:MM"（本地时区）。"""
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(int(ts)))
+    except (TypeError, ValueError, OSError):
+        return "未知"
+
+
+def _save_update_state(info):
+    """把最近一次检查结果落盘，供**新进程**（status / upgrade --check）读取。
+
+    只存检查结论；current / available 在读取时按当前 APP_VERSION 重算，
+    避免升级后仍显示"有新版本"。
+    """
+    rec = {k: info.get(k) for k in
+           ("ok", "latest", "available", "url", "name",
+            "published_at", "checked_at", "error")}
+    try:
+        update_state({UPDATE_STATE_KEY: rec})
+    except Exception as e:  # noqa: BLE001 落盘失败不影响检查结果
+        log.debug("保存更新检查结果失败: %r", e)
+
+
 def get_update_info():
-    """读取上一次 Release 检查的缓存（绝不发网络请求）。"""
+    """读取最近一次 Release 检查结果：内存缓存 → state.json → 默认值。
+
+    绝不发网络请求。缓存为空时用落盘记录"预热"，这样 CLI 新进程也能看到
+    界面进程上次查到的结果，而不是永远显示"未检查"。
+    """
     with _UPDATE_LOCK:
+        if _UPDATE_CACHE["data"] is None:
+            rec = load_state().get(UPDATE_STATE_KEY)
+            if isinstance(rec, dict):
+                data = _default_update_info()
+                data.update({k: rec[k] for k in data if k in rec})
+                data["current"] = APP_VERSION
+                latest = str(data.get("latest") or "").strip()
+                data["available"] = bool(latest) and (
+                    _ver_key(latest) > _ver_key(APP_VERSION))
+                _UPDATE_CACHE["data"] = data
+                _UPDATE_CACHE["t"] = float(data.get("checked_at") or 0)
         data = _UPDATE_CACHE["data"]
         return dict(data) if data is not None else _default_update_info()
+
+
+def update_check_due(now=None):
+    """距离上次检查是否该重查（成功 6 小时、失败 5 分钟）。返回 (due, info)。
+
+    只做判定、不发请求；由界面决定"当前在线时才真正去查"。
+    """
+    info = get_update_info()
+    checked = int(info.get("checked_at") or 0)
+    if not checked:
+        return True, info
+    interval = UPDATE_CHECK_TTL if info.get("ok") else UPDATE_CHECK_FAIL_TTL
+    return ((now if now is not None else time.time()) - checked) >= interval, info
 
 
 def check_latest_release(force=False, timeout=5.0):
@@ -1629,6 +1684,7 @@ def check_latest_release(force=False, timeout=5.0):
 
     只使用标准库；失败不抛异常，由调用方决定是否提示。成功缓存 6 小时，
     失败缓存 5 分钟，避免界面反复轮询时打满 GitHub 的匿名 API 限额。
+    结果同时落盘 state.json，CLI（新进程）也能读到上次检查结论。
     """
     now = time.time()
     with _UPDATE_LOCK:
@@ -1637,44 +1693,50 @@ def check_latest_release(force=False, timeout=5.0):
             ttl = UPDATE_CHECK_TTL if cached.get("ok") else UPDATE_CHECK_FAIL_TTL
             if now - _UPDATE_CACHE["t"] < ttl:
                 return dict(cached)
-
-    info = _default_update_info()
+    if not _UPDATE_FETCH_LOCK.acquire(blocking=False):
+        # 界面自动重查与手动点击撞车：只保留一个请求，另一个直接复用当前结果
+        return get_update_info()
     try:
-        req = urllib.request.Request(
-            GITHUB_API_LATEST,
-            headers={
-                "User-Agent": "CampusNetAuth/" + APP_VERSION,
-                "Accept": "application/vnd.github+json",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
-        if not isinstance(payload, dict):
-            raise ValueError("GitHub API 返回格式异常")
-        latest = _release_version(payload.get("tag_name"))
-        if not _ver_key(latest):
-            raise ValueError("无法解析 Release 版本号: %r"
-                             % (payload.get("tag_name"),))
-        info.update({
-            "ok": True,
-            "latest": latest,
-            "available": _ver_key(latest) > _ver_key(APP_VERSION),
-            "name": str(payload.get("name") or ""),
-            "published_at": str(payload.get("published_at") or ""),
-        })
-        html_url = payload.get("html_url")
-        if _release_url_allowed(html_url):
-            info["url"] = html_url
-        log.debug("Release 检查：当前 %s / 最新 %s / 可用更新=%s",
-                  APP_VERSION, latest, info["available"])
-    except Exception as e:  # noqa: BLE001 网络/解析失败都按"检查失败"处理
-        info["error"] = "%s: %s" % (e.__class__.__name__, e)
-        log.debug("检查 GitHub Release 失败: %r", e)
-    info["checked_at"] = int(time.time())
-    with _UPDATE_LOCK:
-        _UPDATE_CACHE["t"] = time.time()
-        _UPDATE_CACHE["data"] = dict(info)
-    return info
+        info = _default_update_info()
+        try:
+            req = urllib.request.Request(
+                GITHUB_API_LATEST,
+                headers={
+                    "User-Agent": "CampusNetAuth/" + APP_VERSION,
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(payload, dict):
+                raise ValueError("GitHub API 返回格式异常")
+            latest = _release_version(payload.get("tag_name"))
+            if not _ver_key(latest):
+                raise ValueError("无法解析 Release 版本号: %r"
+                                 % (payload.get("tag_name"),))
+            info.update({
+                "ok": True,
+                "latest": latest,
+                "available": _ver_key(latest) > _ver_key(APP_VERSION),
+                "name": str(payload.get("name") or ""),
+                "published_at": str(payload.get("published_at") or ""),
+            })
+            html_url = payload.get("html_url")
+            if _release_url_allowed(html_url):
+                info["url"] = html_url
+            log.debug("Release 检查：当前 %s / 最新 %s / 可用更新=%s",
+                      APP_VERSION, latest, info["available"])
+        except Exception as e:  # noqa: BLE001 网络/解析失败都按"检查失败"处理
+            info["error"] = "%s: %s" % (e.__class__.__name__, e)
+            log.debug("检查 GitHub Release 失败: %r", e)
+        info["checked_at"] = int(time.time())
+        _save_update_state(info)
+        with _UPDATE_LOCK:
+            _UPDATE_CACHE["t"] = time.time()
+            _UPDATE_CACHE["data"] = dict(info)
+        return info
+    finally:
+        _UPDATE_FETCH_LOCK.release()
 
 
 def open_release_page():
@@ -3503,15 +3565,18 @@ def cmd_status(args):
             print("守护版本 : 未知（%s）" % _dd)
     print("凭据文件 : %s" % ("已存在" if os.path.exists(CRED_PATH) else "缺失"))
     _upd = get_update_info()
+    _when = ("，检查于 " + _fmt_checked_at(_upd.get("checked_at"))
+             if _upd.get("checked_at") else "")
     if not _upd.get("checked_at"):
         print("远程更新 : 未检查（执行 update 检查）")
     elif not _upd.get("ok"):
-        print("远程更新 : 检查失败（%s）" % (_upd.get("error") or "未知"))
+        print("远程更新 : 检查失败（%s%s）"
+              % (_upd.get("error") or "未知", _when))
     elif _upd.get("available"):
-        print("远程更新 : 发现 v%s（%s）"
-              % (_upd.get("latest"), _upd.get("url")))
+        print("远程更新 : 发现 v%s（%s%s）"
+              % (_upd.get("latest"), _upd.get("url"), _when))
     else:
-        print("远程更新 : 已是最新（v%s）" % _upd.get("latest"))
+        print("远程更新 : 已是最新（v%s%s）" % (_upd.get("latest"), _when))
     # 登录页兜底：网关不做 302 劫持时靠它自己拼登录页，填错了很难自查
     hints = cfg.get("login_page_hints") or {}
     if isinstance(hints, dict) and hints.get("nasip") and hints.get("wlanacname"):
@@ -3556,6 +3621,16 @@ def cmd_upgrade(args):
         up, up_ver = find_upgrade_candidate()
         print("升级候选 : %s" % ("%s（v%s）" % (os.path.basename(up), up_ver)
                                 if up else "未发现（把新 exe 放进程序目录即可）"))
+        # 远端最新版本（读上次检查结论，不发网络请求；新进程靠 state.json 预热）
+        _upd = get_update_info()
+        if _upd.get("ok") and _upd.get("checked_at"):
+            print("远端最新 : v%s（%s；检查于 %s）" % (
+                _upd.get("latest"),
+                "有更新，执行 update 查看下载页" if _upd.get("available")
+                else "已是最新",
+                _fmt_checked_at(_upd.get("checked_at"))))
+        else:
+            print("远端最新 : 未检查（执行 update 检查 GitHub Release）")
         return 0
 
     ok, msg = apply_upgrade()
@@ -3940,7 +4015,8 @@ def main():
     p_up = sub.add_parser("upgrade",
                           help="就地升级到程序目录里的新版本并重启守护")
     p_up.add_argument("--check", action="store_true",
-                      help="只体检（守护版本 + 升级候选），不改动任何文件")
+                      help="只体检（守护版本 + 升级候选 + 上次远端检查结论），"
+                           "不改动任何文件")
     p_up.set_defaults(func=cmd_upgrade)
     p_update = sub.add_parser("update",
                               help="检查 GitHub 最新 Release（只检查，不下载）")
