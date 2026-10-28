@@ -168,7 +168,8 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 > **规则**：每发一次 Release 必须在表里补一行；未发布的 main 改动写在"当前开发线"。
 > 版本号以 `campusnet.py` 的 `APP_VERSION` 为准，本表只做摘要。
 
-**当前开发线**：`main` @ `002ed78`，`APP_VERSION = 0.6.1`，**与最新 Release V0.6.1 一致（无未发布改动）**。
+**当前开发线**：`main`，`APP_VERSION = 0.6.1`，**与最新 Release V0.6.1 一致（无未发布的功能改动）**。
+具体提交以 `git log` / `git status -sb` 为准——本节不钉死提交号，避免文档一提交就过期。
 
 | 版本 | 日期 | 状态 | 要点 |
 |---|---|---|---|
