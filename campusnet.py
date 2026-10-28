@@ -135,7 +135,8 @@ _MEI_CLEANED = _cleanup_stale_mei()
 #         验证码/短信/CAS 给出结论而不是无限重试、累计计数落盘、MAC 按网卡取、
 #         配置值校验、自启/升级相关日志措辞）
 #         + 更新检查结果落盘 / 在线自动补查 / 界面与 CLI 透出远端版本
-APP_VERSION = "0.6.1"
+# 0.6.2 = 「检查更新」支持一键下载并升级（资产 SHA256 + 版本校验，仅限本仓库）
+APP_VERSION = "0.6.2"
 GITHUB_REPO = "Origin-XiChen/campus-net-auth"
 GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
 GITHUB_API_LATEST = ("https://api.github.com/repos/%s/releases/latest"
@@ -1843,11 +1844,23 @@ def _release_url_allowed(url):
             and url.startswith("https://github.com/%s/releases/" % GITHUB_REPO))
 
 
+def _release_asset_url_allowed(url):
+    """只允许下载本仓库 Release 的**资产**（releases/download/...）。
+
+    比"页面"白名单更严：自动下载只认这一种前缀，杜绝把任意 URL 当成更新包。
+    """
+    return (isinstance(url, str)
+            and url.startswith("https://github.com/%s/releases/download/"
+                               % GITHUB_REPO))
+
+
 def _default_update_info():
     return {
         "ok": False, "current": APP_VERSION, "latest": "", "available": False,
         "url": GITHUB_RELEASES_URL, "name": "", "published_at": "",
         "checked_at": 0, "error": "",
+        # 更新资产（一键下载用）：只认本仓库 releases/download 前缀
+        "asset_url": "", "asset_size": 0, "asset_sha256": "",
     }
 
 
@@ -1867,7 +1880,8 @@ def _save_update_state(info):
     """
     rec = {k: info.get(k) for k in
            ("ok", "latest", "available", "url", "name",
-            "published_at", "checked_at", "error")}
+            "published_at", "checked_at", "error",
+            "asset_url", "asset_size", "asset_sha256")}
     try:
         update_state({UPDATE_STATE_KEY: rec})
     except Exception as e:  # noqa: BLE001 落盘失败不影响检查结果
@@ -1954,6 +1968,25 @@ def check_latest_release(force=False, timeout=5.0):
             html_url = payload.get("html_url")
             if _release_url_allowed(html_url):
                 info["url"] = html_url
+            # 更新资产：只认名字精确匹配 + 本仓库 releases/download 前缀。
+            # digest 是 GitHub 为 Release 资产提供的 sha256（没有就只校验大小）。
+            for asset in payload.get("assets") or []:
+                if not isinstance(asset, dict):
+                    continue
+                if str(asset.get("name") or "") != APP_NAME + ".exe":
+                    continue
+                dl_url = str(asset.get("browser_download_url") or "")
+                if not _release_asset_url_allowed(dl_url):
+                    continue
+                info["asset_url"] = dl_url
+                try:
+                    info["asset_size"] = int(asset.get("size") or 0)
+                except (TypeError, ValueError):
+                    info["asset_size"] = 0
+                digest = str(asset.get("digest") or "").strip().lower()
+                if digest.startswith("sha256:"):
+                    info["asset_sha256"] = digest.split(":", 1)[1].strip()
+                break
             log.debug("Release 检查：当前 %s / 最新 %s / 可用更新=%s",
                       APP_VERSION, latest, info["available"])
         except Exception as e:  # noqa: BLE001 网络/解析失败都按"检查失败"处理
@@ -1967,6 +2000,77 @@ def check_latest_release(force=False, timeout=5.0):
         return info
     finally:
         _UPDATE_FETCH_LOCK.release()
+
+
+DOWNLOAD_TMP_NAME = "_CampusNetAuth_update.tmp"   # 不以 .exe 结尾，避免被当成升级候选
+
+
+def download_release_asset(info, dest=None, timeout=30.0):
+    """从本仓库 Release 下载更新资产并校验，返回 (path, error)。
+
+    * 只接受 `https://github.com/<repo>/releases/download/` 前缀；
+    * 先写 `.part`，校验「大小 → SHA256（API 给了才算）→ 文件版本」后原子改名；
+    * 只读 PE 版本资源，**绝不执行**下载下来的文件；
+    * 任何一步失败都删掉临时文件，返回 (None, 可读原因)。
+    """
+    info = info or {}
+    if not getattr(sys, "frozen", False):
+        return None, "开发态不支持自动下载升级（请直接重新构建）"
+    url = str(info.get("asset_url") or "")
+    if not url:
+        return None, "没有可用的下载地址（请先点「检查更新」重新获取）"
+    if not _release_asset_url_allowed(url):
+        return None, "下载地址不是本仓库的 Release 资产，已拒绝"
+    try:
+        expect_size = int(info.get("asset_size") or 0)
+    except (TypeError, ValueError):
+        expect_size = 0
+    expect_sha = str(info.get("asset_sha256") or "").strip().lower()
+
+    dest = dest or os.path.join(BASE_DIR, DOWNLOAD_TMP_NAME)
+    part = dest + ".part"
+    h = hashlib.sha256()
+    got = 0
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "CampusNetAuth/" + APP_VERSION})
+        with urllib.request.urlopen(req, timeout=timeout) as resp, \
+                open(part, "wb") as f:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+                if expect_size and got > expect_size:
+                    raise ValueError("下载内容超过声明大小（%d 字节）" % expect_size)
+            f.flush()
+            os.fsync(f.fileno())
+        if expect_size and got != expect_size:
+            raise ValueError("大小不符（收到 %d / 应为 %d 字节）" % (got, expect_size))
+        if expect_sha and h.hexdigest() != expect_sha:
+            raise ValueError("SHA256 校验失败（下载可能损坏或被篡改）")
+        ver, product = pe_version(part)
+        if not ver:
+            raise ValueError("下载的文件没有版本信息，可能不是有效的程序文件")
+        if product and product != APP_NAME:
+            raise ValueError("该文件的 ProductName 是 %r，不是 %s"
+                             % (product, APP_NAME))
+        if _ver_key(ver) <= _ver_key(APP_VERSION):
+            raise ValueError("下载的版本 %s 不高于当前 %s" % (ver, APP_VERSION))
+        os.replace(part, dest)
+        log.info("更新包已下载并校验通过：v%s（%d 字节）", ver, got)
+        return dest, ""
+    except Exception as e:  # noqa: BLE001 网络/校验/写入失败统一转成可读原因
+        for p in (part, dest):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        log.warning("下载更新失败: %r", e)
+        return None, str(e)
 
 
 def open_release_page():

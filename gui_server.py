@@ -289,6 +289,25 @@ def _task_upgrade_apply() -> str:
     return msg
 
 
+def _task_update_install() -> str:
+    """一键下载并升级：下载 Release 资产 → 校验 → 复用 apply_upgrade 就地替换。"""
+    info = cn.get_update_info()
+    if not (info.get("ok") and info.get("available")):
+        return "当前没有可用的新版本（请先点「检查更新」）"
+    path, err = cn.download_release_asset(info)
+    if not path:
+        return "下载失败：%s" % err
+    ok, msg = cn.apply_upgrade(path)
+    if not ok:
+        try:
+            os.remove(path)   # 升级没成功就别把安装包留在程序目录里
+        except OSError:
+            pass
+        return "升级失败：%s" % msg
+    cn.notify_system("校园网无感认证", msg)
+    return msg
+
+
 
 def _tail_log(n: int = _LOG_TAIL) -> str:
     """从日志文件尾部读取最后 n 行（seek 到尾部，不整读全文件；
@@ -552,6 +571,9 @@ class Handler(BaseHTTPRequestHandler):
                             "update": cn.check_latest_release(force=True)})
             elif path == "/api/update/open":
                 self._json({"ok": cn.open_release_page()})
+            elif path == "/api/update/install":
+                # 一键下载并升级：下载/校验在后台任务里跑，前端每秒轮询结果
+                self._json({"id": _start_task(_task_update_install)})
             elif path == "/api/uninstall":
                 # 彻底卸载：释放并拉起同目录的独立卸载器。
                 # ⚠️ 必须在**独立进程**里做：Windows 下运行中的主 exe 无法删除
@@ -1243,7 +1265,8 @@ input{font-family:inherit;font-size:inherit}
             </div>
             <span class="comp-state" id="updateState">—</span>
             <button class="btn btn-ghost" id="btnUpdateCheck" style="flex-shrink:0">检查更新</button>
-            <button class="btn btn-primary" id="btnOpenRelease" style="flex-shrink:0;display:none">打开发布页</button>
+            <button class="btn btn-primary" id="btnUpdateInstall" style="flex-shrink:0;display:none">下载并升级</button>
+            <button class="btn btn-ghost" id="btnOpenRelease" style="flex-shrink:0;display:none">打开发布页</button>
           </div>
           <div class="comp-row">
             <div class="comp-info">
@@ -1545,13 +1568,15 @@ async function load(){
   } else {
     $('#updateSub').textContent = '当前 v' + (st.app_version || '')
       + (updWhen ? ' · 上次检查 ' + updWhen : '')
-      + ' · 自动检查 GitHub Release（只检查，不下载）';
+      + ' · 自动检查 GitHub Release（可一键下载升级）';
   }
   if (upd.available){
     upState.textContent = 'v' + upd.latest + ' 可用';
     upState.className = 'comp-state warn';
+    $('#btnUpdateInstall').style.display = '';
     $('#btnOpenRelease').style.display = '';
   } else {
+    $('#btnUpdateInstall').style.display = 'none';
     $('#btnOpenRelease').style.display = 'none';
     if (upd.ok){ upState.textContent = '已是最新'; upState.className = 'comp-state ok'; }
     else if (upd.checked_at){ upState.textContent = '检查失败'; upState.className = 'comp-state warn'; }
@@ -1808,7 +1833,7 @@ $('#btnHealth').onclick = () => {
   });
 };
 
-/* ---------- 版本更新（只检查，不自动下载）---------- */
+/* ---------- 版本更新（自动检查 + 一键下载升级）---------- */
 async function checkUpdate(btn){
   busy(true, btn, '检查中…');
   try{
@@ -1831,6 +1856,20 @@ async function openRelease(){
 }
 $('#btnUpdateCheck').onclick = () => checkUpdate($('#btnUpdateCheck'));
 $('#btnOpenRelease').onclick = () => openRelease();
+// 一键下载并升级：下载/校验在后台任务里跑，前端用 withTask 轮询结果
+$('#btnUpdateInstall').onclick = () => {
+  const u = (lastSt && lastSt.update) || {};
+  const size = u.asset_size ? ('约 ' + (u.asset_size / 1048576).toFixed(1) + ' MB')
+                            : 'Release 资产';
+  confirmDialog({
+    title: '下载并升级到 v' + (u.latest || ''),
+    html: '将下载 <b>v' + esc(u.latest || '') + '</b>（' + size + '）并<b>就地升级</b>：'
+        + '停止守护 → 替换程序文件 → 用新版本重启守护。<br><br>'
+        + '下载后会校验 <b>SHA256 + 文件版本</b>；升级完成后需要<b>关闭并重新打开本界面</b>。确定继续？',
+    okText: '下载并升级',
+    onOk: () => withTask('/api/update/install', $('#btnUpdateInstall'), '下载中…', '下载并升级')
+  });
+};
 $('#btnOpenRelease2').onclick = () => openRelease();
 // 彻底卸载：打开同目录的独立卸载器（它自己的窗口里再确认一次）。
 // ⚠️ 必须是独立 exe：Windows 下运行中的主 exe 删不掉自己；卸载器会连本界面

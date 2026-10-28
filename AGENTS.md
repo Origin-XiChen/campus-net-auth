@@ -53,6 +53,10 @@ python -m unittest discover -s tests   # 全量离线单测（当前 200 项，�
   `127.0.0.1:47667` 上的 `STOP` / `CHECK` / `VER` 指令。
 - **自启** = HKCU `...\CurrentVersion\Run` 值 `CampusNetAuth` = `"<exe>" daemon`
   （0.6.0 起不再经 VBS）。
+- **更新**：只查 GitHub `/releases/latest`；0.6.2 起可一键下载资产并就地升级
+  （`download_release_asset()` → `apply_upgrade()`），下载只认
+  `github.com/<repo>/releases/download/` 前缀，校验大小 + sha256 + 版本后才换文件，
+  **绝不执行**下载的文件。
 - **组件**：0.6.0 起自启/守护/界面合并为同一个 exe；`CampusNetAuthDaemon.vbs` /
   `CampusNetAuthUI.vbs` 仅作历史残留清理，**不要恢复成主路径**。
 - **版本单一来源**：`campusnet.py` 顶部 `APP_VERSION`；exe 版本资源由
@@ -168,7 +172,7 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 > **规则**：每发一次 Release 必须在表里补一行；未发布的 main 改动写在"当前开发线"。
 > 版本号以 `campusnet.py` 的 `APP_VERSION` 为准，本表只做摘要。
 
-**当前开发线**：`main`，`APP_VERSION = 0.6.1`，**与最新 Release V0.6.1 一致（无未发布的功能改动）**。
+**当前开发线**：`main`，`APP_VERSION = 0.6.2`，**未发布**（新功能：检查更新支持一键下载并升级）。
 具体提交以 `git log` / `git status -sb` 为准——本节不钉死提交号，避免文档一提交就过期。
 
 | 版本 | 日期 | 状态 | 要点 |
@@ -189,8 +193,9 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 
 - **P2 大件未做**：`campusnet.py` 拆包（portal/crypt/cred/daemon/autostart/cli）、
   删除 `ui.py`（约 2000 行）改浏览器回退、6 个中文管理 `.bat` 的去留。
-- **检查更新无资产完整性校验**：只靠 GitHub HTTPS + PE 版本 + ProductName；可考虑
-  Release 附 `SHA256SUMS` 并在 `apply_upgrade` 校验（需改发布流程）。
+- **更新包没有代码签名**：一键下载已校验大小 + GitHub API 的 sha256 + PE 版本/ProductName，
+  但没有 Authenticode 签名，也没有独立于 GitHub 的哈希渠道；若在意供应链，可再加签名或
+  Release 附 `SHA256SUMS`。
 - **自启悬空行为待复核**：0.6.0 起 Run 键直接指向 exe（不再经 `wscript //B`），
   "用户绿色删除整个目录后开机是否弹错"需要一次真机复核。
 - **`once` 是任务计划场景**：已改为尊重手动下线静默期；若未来加定时任务要沿用该语义。

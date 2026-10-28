@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """GitHub Release 更新检查（只检查，不下载、不替换文件）。"""
 
+import hashlib
 import json
+import os
 import time
 import unittest
 from unittest import mock
@@ -24,14 +26,24 @@ class _Resp:
         return False
 
 
-def _payload(tag="v0.6.2", name="0.6.2", url=None):
-    return {
+def _payload(tag="v0.6.2", name="0.6.2", url=None, asset=True):
+    payload = {
         "tag_name": tag,
         "name": name,
         "published_at": "2026-10-24T08:00:00Z",
         "html_url": url if url is not None else (
             "https://github.com/%s/releases/tag/%s" % (cn.GITHUB_REPO, tag)),
     }
+    if asset:
+        payload["assets"] = [{
+            "name": "CampusNetAuth.exe",
+            "size": 12345,
+            "digest": "sha256:" + "a" * 64,
+            "browser_download_url": (
+                "https://github.com/%s/releases/download/%s/CampusNetAuth.exe"
+                % (cn.GITHUB_REPO, tag)),
+        }]
+    return payload
 
 
 class TestReleaseCheck(_StateDirMixin):
@@ -117,6 +129,138 @@ class TestReleaseCheck(_StateDirMixin):
         self.assertFalse(info["ok"])
         self.assertEqual(info["current"], cn.APP_VERSION)
         m.assert_not_called()
+
+    def test_asset_info_extracted(self):
+        """更新包信息（URL/大小/sha256）随检查结果一起返回，供一键下载使用。"""
+        info, _ = self._check(_payload("v9.9.9", name="9.9.9"))
+        self.assertEqual(info["asset_size"], 12345)
+        self.assertEqual(info["asset_sha256"], "a" * 64)
+        self.assertEqual(
+            info["asset_url"],
+            "https://github.com/%s/releases/download/v9.9.9/CampusNetAuth.exe"
+            % cn.GITHUB_REPO)
+
+    def test_untrusted_asset_url_ignored(self):
+        """资产地址不是本仓库 releases/download 前缀 → 一律不采用。"""
+        payload = _payload("v9.9.9", name="9.9.9")
+        payload["assets"][0]["browser_download_url"] = \
+            "https://evil.example/CampusNetAuth.exe"
+        info, _ = self._check(payload)
+        self.assertEqual(info["asset_url"], "")
+        self.assertEqual(info["asset_size"], 0)
+
+
+class _AssetResp:
+    """把 bytes 包装成 urlopen 的响应（支持 read(n) 分块）。"""
+
+    def __init__(self, data):
+        self._data = data
+        self._pos = 0
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = len(self._data) - self._pos
+        chunk = self._data[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestDownloadReleaseAsset(_StateDirMixin):
+    """一键下载：白名单 + 大小/SHA256/版本三重校验 + 失败清理。"""
+
+    DATA = b"FAKE-EXE-BYTES"
+
+    def setUp(self):
+        _StateDirMixin.setUp(self)
+        self.dest = os.path.join(os.path.dirname(self._state_file),
+                                 "_test_update_%d.tmp" % os.getpid())
+        self.info = {
+            "asset_url": ("https://github.com/%s/releases/download/"
+                          "v9.9.9/CampusNetAuth.exe" % cn.GITHUB_REPO),
+            "asset_size": len(self.DATA),
+            "asset_sha256": hashlib.sha256(self.DATA).hexdigest(),
+        }
+
+    def tearDown(self):
+        for p in (self.dest, self.dest + ".part"):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        _StateDirMixin.tearDown(self)
+
+    def _download(self, data=None, ver=("9.9.9", "CampusNetAuth"), frozen=True,
+                  info=None):
+        data = self.DATA if data is None else data
+        with mock.patch.object(cn.urllib.request, "urlopen",
+                               return_value=_AssetResp(data)), \
+                mock.patch.object(cn, "pe_version", return_value=ver), \
+                mock.patch.object(cn.sys, "frozen", frozen, create=True):
+            return cn.download_release_asset(info or self.info, dest=self.dest)
+
+    def test_download_ok(self):
+        path, err = self._download()
+        self.assertEqual(err, "")
+        self.assertEqual(path, self.dest)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), self.DATA)
+        self.assertFalse(os.path.exists(self.dest + ".part"))
+
+    def test_rejects_foreign_url(self):
+        info = dict(self.info, asset_url="https://evil.example/x.exe")
+        with mock.patch.object(cn.urllib.request, "urlopen") as m,                 mock.patch.object(cn.sys, "frozen", True, create=True):
+            path, err = cn.download_release_asset(info, dest=self.dest)
+        self.assertIsNone(path)
+        self.assertIn("拒绝", err)
+        m.assert_not_called()
+
+    def test_missing_asset_url(self):
+        with mock.patch.object(cn.sys, "frozen", True, create=True):
+            path, err = cn.download_release_asset({}, dest=self.dest)
+        self.assertIsNone(path)
+        self.assertIn("检查更新", err)
+
+    def test_size_mismatch_cleans_up(self):
+        path, err = self._download(data=self.DATA[:-2])
+        self.assertIsNone(path)
+        self.assertIn("大小不符", err)
+        self.assertFalse(os.path.exists(self.dest))
+        self.assertFalse(os.path.exists(self.dest + ".part"))
+
+    def test_sha_mismatch_cleans_up(self):
+        info = dict(self.info, asset_sha256="b" * 64)
+        path, err = self._download(info=info)
+        self.assertIsNone(path)
+        self.assertIn("SHA256", err)
+        self.assertFalse(os.path.exists(self.dest + ".part"))
+
+    def test_version_not_newer(self):
+        path, err = self._download(ver=("0.0.1", "CampusNetAuth"))
+        self.assertIsNone(path)
+        self.assertIn("不高于当前", err)
+
+    def test_foreign_product_rejected(self):
+        path, err = self._download(ver=("9.9.9", "SomeOtherApp"))
+        self.assertIsNone(path)
+        self.assertIn("不是 CampusNetAuth", err)
+
+    def test_dev_mode_refused(self):
+        path, err = self._download(frozen=False)
+        self.assertIsNone(path)
+        self.assertIn("开发态", err)
+
+    def test_without_digest_only_size_is_checked(self):
+        info = dict(self.info, asset_sha256="")
+        path, err = self._download(info=info)
+        self.assertEqual(err, "")
+        self.assertEqual(path, self.dest)
 
 
 class TestOpenReleasePage(_StateDirMixin):
