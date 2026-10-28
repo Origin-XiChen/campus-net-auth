@@ -42,6 +42,12 @@
 
 ---
 
+> **维护者 / 接管的 AI 请注意**：动手之前先读 **[AGENTS.md](AGENTS.md)**——最高优先级的项目规则、
+> 安全红线、验收清单、发布流程与**按版本汇报的进度表**。本 README 面向使用者；两者冲突时以
+> `AGENTS.md` 为准。
+
+---
+
 ## 面向校园
 
 **湖北工业大学 iHBUT**（Hubei University of Technology）校园网。
