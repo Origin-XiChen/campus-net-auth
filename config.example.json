@@ -31,5 +31,6 @@
     }
   ],
   "pin_pubkey": true,
+  "proxy_guard": "auto",
   "log_level": "INFO"
 }

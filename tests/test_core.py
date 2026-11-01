@@ -275,6 +275,246 @@ class TestSanitizeConfig(_StateDirMixin):
         self.assertEqual(cfg["portal_host"],
                          cn.DEFAULT_CONFIG["portal_host"])
 
+    def test_proxy_guard_only_accepts_auto_or_off(self):
+        """proxy_guard 只认 auto/off；手写错的（如 "true"、"OFF "）一律归一。"""
+        for raw, want in (("off", "off"), ("OFF", "off"), (" off ", "off"),
+                          ("auto", "auto"), ("AUTO", "auto"),
+                          ("yes", "auto"), ("", "auto"), (None, "auto")):
+            with self.subTest(raw=raw):
+                with open(cn.CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"proxy_guard": raw}, f)
+                self.assertEqual(cn.load_config()["proxy_guard"], want)
+
+
+# ---------------- 系统代理守卫（mock winreg / wininet，离线）----------------
+
+class _FakeInetSettings:
+    """模拟 HKCU\\...\\Internet Settings 键：内存字典 + 记录写入。
+
+    只实现本项目用到的那点 API（QueryValueEx / SetValueEx / DeleteValue），
+    让代理逻辑能在任何机器上确定性回放——测试结果绝不能依赖
+    "跑测试这台机器当前有没有开代理"。
+
+    ⚠️ 刻意模拟真实 winreg 的**类型校验**：ProxyEnable 必须是 REG_DWORD，
+    按字符串写要报错。这是自测时抓到的真实 bug——假对象若对类型来者不拒，
+    这个 bug 在单测里就永远看不见。
+    """
+
+    DWORD_NAMES = {"ProxyEnable", "AutoDetect"}
+
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+        self.writes = []      # [(op, name, value)]
+        self.notified = 0
+
+    # ---- 供 campusnet 的两个私有函数替换 ----
+    def read(self, name):
+        return self.values.get(name)
+
+    def write(self, name, value, kind=None):
+        if value is None:
+            self.values.pop(name, None)
+            self.writes.append(("del", name, None))
+            return True
+        # 复刻真实行为：DWORD 名字必须按 REG_DWORD(4) 写，否则失败
+        if name in self.DWORD_NAMES and kind != 4:
+            raise TypeError(
+                "模拟 winreg: %s 需要 REG_DWORD(4)，收到 %r" % (name, kind))
+        self.values[name] = value
+        self.writes.append(("set", name, value))
+        return True
+
+    def notify(self):
+        self.notified += 1
+
+
+class TestProxyGuard(_StateDirMixin):
+    ON = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:15732",
+          "ProxyOverride": "<local>"}
+
+    def setUp(self):
+        super().setUp()
+        self.fake = _FakeInetSettings()
+        self._patches = {
+            "_inet_read": self.fake.read,
+            "_inet_write": self.fake.write,
+            "_inet_notify_changed": self.fake.notify,
+        }
+        self._saved_extra = {k: getattr(cn, k) for k in self._patches}
+        for k, v in self._patches.items():
+            setattr(cn, k, v)
+
+    def tearDown(self):
+        for k, v in self._saved_extra.items():
+            setattr(cn, k, v)
+        super().tearDown()
+
+    # ---- proxy_state 只读判定 ----
+    def test_state_detects_enabled_proxy(self):
+        self.fake.values = dict(self.ON)
+        st = cn.proxy_state()
+        self.assertTrue(st["active"])
+        self.assertTrue(st["enabled"])
+        self.assertEqual(st["server"], "127.0.0.1:15732")
+        self.assertIn("127.0.0.1:15732", st["detail"])
+
+    def test_state_detects_pac_even_without_proxy_enable(self):
+        self.fake.values = {"ProxyEnable": 0,
+                            "AutoConfigURL": "http://x/p.pac"}
+        st = cn.proxy_state()
+        self.assertFalse(st["enabled"])
+        self.assertTrue(st["active"])          # 只有 PAC 也算开启
+        self.assertIn("PAC", st["detail"])
+
+    def test_state_clean_when_nothing_configured(self):
+        st = cn.proxy_state()
+        self.assertFalse(st["active"])
+        self.assertIn("未启用系统代理", st["detail"])
+
+    # ---- 关闭 ----
+    def test_disable_is_noop_without_writes_when_already_clean(self):
+        r = cn.disable_system_proxy(record=False)
+        self.assertFalse(r["changed"])
+        self.assertEqual(self.fake.writes, [])   # 一个字节都不写
+        self.assertEqual(self.fake.notified, 0)  # 也不去通知系统
+
+    def test_disable_turns_off_proxy_and_backs_up(self):
+        self.fake.values = dict(self.ON)
+        self.fake.values["AutoConfigURL"] = "http://x/p.pac"
+        r = cn.disable_system_proxy(reason="TEST")
+        self.assertTrue(r["changed"])
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.fake.values["ProxyEnable"], 0)
+        self.assertNotIn("AutoConfigURL", self.fake.values)
+        # ProxyServer 原样保留：关掉开关即可，不必抹掉服务器地址
+        self.assertEqual(self.fake.values["ProxyServer"], "127.0.0.1:15732")
+        self.assertEqual(self.fake.notified, 1)  # 必须通知系统重读
+        bak = cn.load_state().get("proxy_backup")
+        self.assertEqual(bak["ProxyEnable"], 1)
+        self.assertEqual(bak["ProxyServer"], "127.0.0.1:15732")
+        self.assertEqual(bak["AutoConfigURL"], "http://x/p.pac")
+
+    def test_disable_writes_proxy_enable_as_dword(self):
+        """ProxyEnable 必须按 REG_DWORD 写：按字符串写会在真实注册表上静默失败。"""
+        self.fake.values = dict(self.ON)
+        r = cn.disable_system_proxy(record=False)
+        self.assertTrue(r["ok"], "写入应为成功（DWORD 类型正确）")
+        self.assertIn(("set", "ProxyEnable", 0), self.fake.writes)
+
+    def test_disable_reports_failure_when_type_is_wrong(self):
+        """反向保护：写入失败时必须把 ok 报成 False，而不是假装成功。
+
+        注意：生产代码里的 _inet_write 契约是"永不抛异常、失败返回 False"，
+        所以替身也必须返回 False（而不是抛 TypeError）。
+        """
+        self.fake.values = dict(self.ON)   # 先造出"代理确实开着"的前提
+
+        def bad_write(name, value, kind=None):
+            return False                   # 模拟类型不匹配导致的写入失败
+        with mock.patch.object(cn, "_inet_write", bad_write):
+            r = cn.disable_system_proxy(record=False)
+        self.assertTrue(r["changed"])
+        self.assertFalse(r["ok"])      # 不能静默成功
+
+    def test_disable_is_idempotent_and_keeps_first_backup(self):
+        self.fake.values = dict(self.ON)
+        cn.disable_system_proxy(record=True)
+        first = cn.load_state()["proxy_backup"]
+        r2 = cn.disable_system_proxy(record=True)   # 第二次：已经关了
+        self.assertFalse(r2["changed"])
+        self.assertEqual(cn.load_state()["proxy_backup"], first)
+
+    # ---- 恢复 ----
+    def test_restore_writes_back_exact_original_values(self):
+        self.fake.values = dict(self.ON)
+        cn.disable_system_proxy(record=True)
+        ok, _ = cn.restore_system_proxy()
+        self.assertTrue(ok)
+        self.assertEqual(self.fake.values["ProxyEnable"], 1)
+        self.assertEqual(self.fake.values["ProxyServer"], "127.0.0.1:15732")
+        self.assertNotIn("proxy_backup", cn.load_state())   # 恢复后清备份
+
+    def test_restore_without_backup_reports_cleanly(self):
+        ok, msg = cn.restore_system_proxy()
+        self.assertFalse(ok)
+        self.assertIn("没有可恢复", msg)
+
+    # ---- 配置开关 ----
+    def test_maybe_clear_proxy_respects_off_switch(self):
+        self.fake.values = dict(self.ON)
+        r = cn.maybe_clear_proxy({"proxy_guard": "off"})
+        self.assertTrue(r.get("skipped"))
+        self.assertEqual(self.fake.writes, [])
+        self.assertEqual(self.fake.values["ProxyEnable"], 1)  # 原样不动
+
+    def test_maybe_clear_proxy_defaults_to_auto(self):
+        self.fake.values = dict(self.ON)
+        r = cn.maybe_clear_proxy({})
+        self.assertTrue(r["changed"])
+        self.assertEqual(self.fake.values["ProxyEnable"], 0)
+
+    def test_maybe_clear_proxy_never_raises(self):
+        """代理清理是辅助步骤：内部炸了也不能把认证流程带崩。"""
+        def boom(*a, **k):
+            raise RuntimeError("registry exploded")
+        with mock.patch.object(cn, "disable_system_proxy", side_effect=boom):
+            r = cn.maybe_clear_proxy({"proxy_guard": "auto"})
+        self.assertFalse(r["changed"])
+        self.assertIn("error", r)
+
+
+class TestSafePrint(unittest.TestCase):
+    """CLI 输出在 GBK 流（重定向/管道）下不得崩。
+
+    实测 bug：cmd_proxy --restore 打印 "✓ ..." 时，输出被重定向到文件，
+    Python 按 locale(GBK) 编码 → UnicodeEncodeError → 整条命令以 traceback
+    收场（业务其实已成功）。✓/✗ 不在 GBK 字符集内，必须降级成 ASCII。
+    """
+
+    def _capture(self, lines):
+        import io
+        buf = io.BytesIO()
+        wrapper = io.TextIOWrapper(buf, encoding="gbk", errors="strict",
+                                   newline="")
+        old = sys.stdout
+        sys.stdout = wrapper
+        try:
+            for s in lines:
+                cn.safe_print(s)      # 不得抛异常
+        finally:
+            wrapper.flush()
+            sys.stdout = old
+        data = buf.getvalue()
+        wrapper.detach()              # 别让 wrapper 关掉 BytesIO
+        return data.decode("gbk", "replace")
+
+    def test_check_marks_degrade_to_ascii_in_gbk(self):
+        out = self._capture(["✓ 成功", "✗ 失败"])
+        self.assertIn("[OK]", out)
+        self.assertIn("[FAIL]", out)
+        self.assertNotIn("✓", out)
+        self.assertNotIn("✗", out)
+        self.assertIn("成功", out)     # 中文本身在 GBK 内，不得被破坏
+
+    def test_plain_text_passes_through(self):
+        out = self._capture(["普通中文输出", "ascii line"])
+        self.assertIn("普通中文输出", out)
+        self.assertIn("ascii line", out)
+
+    def test_never_raises_on_broken_stream(self):
+        """输出流坏掉时也不能抛——CLI 的输出只剩装饰意义。"""
+        class Broken:
+            def write(self, *a, **k):
+                raise OSError("stream closed")
+            def flush(self):
+                raise OSError("stream closed")
+        old = sys.stdout
+        sys.stdout = Broken()
+        try:
+            cn.safe_print("anything")      # 不抛即通过
+        finally:
+            sys.stdout = old
+
 
 # ---------------- 门户公钥 pinning（mock 网络，离线）----------------
 

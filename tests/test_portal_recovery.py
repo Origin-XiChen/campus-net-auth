@@ -74,6 +74,10 @@ class DaemonReplay:
                 "record_event": mock.Mock(), "self_exe_path": mock.Mock(return_value="TEST-EXE"),
                 "logout_stale_session": self.logout,
                 "notify_system": self.notifications, "log": self.log,
+                # 代理守卫：回放测试不碰真实注册表，也不许它改测试机上的代理
+                # （否则测试结果会依赖本机"当前是否开着代理"）
+                "maybe_clear_proxy": mock.Mock(
+                    return_value={"changed": False, "ok": True}),
                 "http_request": mock.Mock(side_effect=AssertionError("unexpected HTTP")),
             }
             for name, value in patches.items():
