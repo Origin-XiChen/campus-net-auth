@@ -217,20 +217,90 @@ class TestDisableProxy(_StateDirMixin):
 
 
 class TestDaemonProxyGuardScope(unittest.TestCase):
-    """守护只在校园网内动代理：校外（门户不可达）不能关用户的代理。"""
+    """守护启动时会过一遍守卫；是否动手由 maybe_clear_proxy 的判定决定。"""
 
-    def test_guard_runs_on_campus(self):
+    def test_guard_checked_at_startup(self):
         from tests.test_portal_recovery import DaemonReplay
         replay = DaemonReplay(commands=["STOP"])
         self.assertEqual(replay.run(), 0)
         replay.proxy_guard.assert_called_once()
 
-    def test_guard_skipped_off_campus(self):
-        from tests.test_portal_recovery import DaemonReplay
-        replay = DaemonReplay(commands=["STOP"])
-        replay.client.portal_reachable = mock.Mock(return_value=False)
-        self.assertEqual(replay.run(), 0)
-        replay.proxy_guard.assert_not_called()
+
+class TestProxyGuardLocationAndLiveness(_StateDirMixin):
+    """校园网内一律关；校外只关"死代理"（本地端口无人监听）。"""
+
+    ON = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:15732"}
+
+    def setUp(self):
+        _StateDirMixin.setUp(self)
+        self.fake = _FakeInetSettings(self.ON)
+        self._patched = {
+            "_inet_read": self.fake.read,
+            "_inet_write": self.fake.write,
+            "_inet_notify_changed": self.fake.notify,
+        }
+        self._saved = {k: getattr(cn, k) for k in self._patched}
+        for k, v in self._patched.items():
+            setattr(cn, k, v)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(cn, k, v)
+        _StateDirMixin.tearDown(self)
+
+    def client(self, on_campus):
+        c = mock.Mock()
+        c.portal_reachable.return_value = on_campus
+        return c
+
+    def test_campus_disables_even_if_proxy_alive(self):
+        with mock.patch.object(cn, "_proxy_local_endpoint_alive",
+                               return_value=True):
+            r = cn.maybe_clear_proxy({"proxy_guard": "auto"},
+                                     client=self.client(True))
+        self.assertTrue(r["changed"])
+        self.assertEqual(self.fake.values["ProxyEnable"], 0)
+
+    def test_off_campus_leaves_live_proxy_alone(self):
+        with mock.patch.object(cn, "_proxy_local_endpoint_alive",
+                               return_value=True):
+            r = cn.maybe_clear_proxy({"proxy_guard": "auto"},
+                                     client=self.client(False))
+        self.assertFalse(r["changed"])
+        self.assertEqual(self.fake.values["ProxyEnable"], 1)   # 原样不动
+
+    def test_off_campus_clears_dead_proxy(self):
+        with mock.patch.object(cn, "_proxy_local_endpoint_alive",
+                               return_value=False):
+            r = cn.maybe_clear_proxy({"proxy_guard": "auto"},
+                                     client=self.client(False))
+        self.assertTrue(r["changed"])
+        self.assertEqual(self.fake.values["ProxyEnable"], 0)
+
+    def test_off_campus_pac_only_is_left_alone(self):
+        # 只有 PAC、没有本地端口可探测 → 无法判断 → 保守不动
+        self.fake.values = {"AutoConfigURL": "http://pac.example/proxy.pac"}
+        with mock.patch.object(cn, "_proxy_local_endpoint_alive",
+                               return_value=None):
+            r = cn.maybe_clear_proxy({"proxy_guard": "auto"},
+                                     client=self.client(False))
+        self.assertFalse(r["changed"])
+        self.assertIn("AutoConfigURL", self.fake.values)
+
+    def test_proxy_endpoints_parsing(self):
+        self.assertEqual(cn._proxy_endpoints("127.0.0.1:7890"),
+                         [("127.0.0.1", 7890)])
+        self.assertEqual(
+            cn._proxy_endpoints("http=127.0.0.1:7890;https=127.0.0.1:7891"),
+            [("127.0.0.1", 7890), ("127.0.0.1", 7891)])
+        self.assertEqual(cn._proxy_endpoints("socks5://127.0.0.1:1080/"),
+                         [("127.0.0.1", 1080)])
+        self.assertEqual(cn._proxy_endpoints("garbage"), [])
+        self.assertEqual(cn._proxy_endpoints(""), [])
+
+    def test_local_endpoint_alive_ignores_remote_proxy(self):
+        # 远端代理无法用本地端口判断 → None（保守）
+        self.assertIsNone(cn._proxy_local_endpoint_alive("10.1.2.3:8080"))
 
 
 class TestProxyGuardConfig(_StateDirMixin):

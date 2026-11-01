@@ -721,10 +721,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "尚未配置账号密码"})
             return
         client = cn.PortalClient(cfg)
-        # 与守护/CLI 同一道门：只在校园网内（门户直连可达）才清理系统代理，
-        # 校外不碰用户可能赖以联网的代理。检测到未开代理时本身也是零写入。
-        if client.portal_reachable():
-            cn.maybe_clear_proxy(cfg, reason="界面立即连接前清理系统代理")
+        # 与守护/CLI 同一套判定：校园网内一律清；校外只清"死代理"
+        # （本地代理端口无人监听），代理还活着就绝不碰。
+        cn.maybe_clear_proxy(cfg, reason="界面立即连接前清理系统代理",
+                             client=client)
         online, _ = client.check_online()
         if online:
             cn.clear_logout_pause()  # 已在线 = 不再处于"手动下线"状态

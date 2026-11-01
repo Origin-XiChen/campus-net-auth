@@ -110,8 +110,7 @@ class TestDaemonRecovery(unittest.TestCase):
         replay = DaemonReplay(page=False)
         replay.client.portal_reachable.return_value = False
         self.assertEqual(replay.run(), 0)
-        # 启动时的代理守卫会探一次门户，第一轮循环再探一次
-        self.assertEqual(replay.client.portal_reachable.call_count, 2)
+        self.assertEqual(replay.client.portal_reachable.call_count, 1)
         replay.client.login.assert_not_called()
         self.assertEqual(replay.waits, [10])
 
@@ -148,8 +147,7 @@ class TestDaemonRecovery(unittest.TestCase):
 
     def test_check_also_interrupts_unreachable_portal_wait(self):
         replay = DaemonReplay(commands=["CHECK", "STOP"])
-        # 第一项给"启动时的代理守卫"，第二项给第一轮循环探测
-        replay.client.portal_reachable.side_effect = [False, False, True]
+        replay.client.portal_reachable.side_effect = [False, True]
         self.assertEqual(replay.run(), 0)
         replay.client.login.assert_called_once()
         self.assertEqual(replay.waits, [10, 20])
