@@ -159,6 +159,11 @@ def _status_payload() -> dict:
                      "name": os.path.basename(dc.get("upgrade") or "")}
                     if dc.get("upgrade") else None),
         "app_version": cn.APP_VERSION,
+        # 系统代理守卫：界面据此显示"当前系统代理是否开着 / 守卫是否启用"，
+        # 并提供「立即关闭」「恢复关闭前的设置」两个动作。
+        "proxy": cn.proxy_state(),
+        "proxy_guard": cfg.get("proxy_guard", "auto"),
+        "proxy_backup": cn.load_state().get("proxy_backup"),
     }
 
 
@@ -597,6 +602,17 @@ class Handler(BaseHTTPRequestHandler):
                                     "message": "卸载程序已启动，请在弹出的窗口里确认"})
                     except Exception as e:  # noqa: BLE001
                         self._json({"ok": False, "error": "%r" % e})
+            elif path == "/api/proxy/off":
+                # 立即关闭系统代理（与守护启动时同一套逻辑，幂等）
+                r = cn.disable_system_proxy(reason="界面手动关闭")
+                self._json({"ok": bool(r.get("ok")),
+                            "changed": bool(r.get("changed")),
+                            "before": r.get("before"),
+                            "proxy": cn.proxy_state()})
+            elif path == "/api/proxy/restore":
+                ok, msg = cn.restore_system_proxy()
+                self._json({"ok": bool(ok), "message": msg,
+                            "proxy": cn.proxy_state()})
             elif path == "/api/daemon/refresh":
                 # 守护版本自愈：旧版本守护立刻重启，让新功能生效。
                 # 走后台任务：体检要访问控制通道，可能等 1~3s。
@@ -667,8 +683,9 @@ class Handler(BaseHTTPRequestHandler):
                        "retry_interval": (5, 3600), "max_interval": (60, 86400),
                        "timeout": (2, 60)}
         _SERVICES = ("default", "DX", "YD", "LT", "auto")
+        _PROXY_GUARD = ("auto", "off")
         for key in ("username", "service", "interval", "offline_interval",
-                    "retry_interval", "max_interval", "timeout"):
+                    "retry_interval", "max_interval", "timeout", "proxy_guard"):
             if key in data and str(data[key]) != "":
                 v = data[key]
                 if key in _INT_BOUNDS:
@@ -680,6 +697,9 @@ class Handler(BaseHTTPRequestHandler):
                     cfg[key] = min(max(lo, iv), hi)
                 elif key == "service":
                     if str(v) in _SERVICES:
+                        cfg[key] = str(v)
+                elif key == "proxy_guard":
+                    if str(v) in _PROXY_GUARD:
                         cfg[key] = str(v)
                 else:
                     cfg[key] = str(v)[:64]  # username
@@ -1249,6 +1269,36 @@ input{font-family:inherit;font-size:inherit}
         </div>
 
         <div class="card">
+          <div class="card-title">系统代理守卫</div>
+          <div class="card-sub">
+            开机前若开着代理（梯子），开机后系统代理仍是开着的状态——节点在未认证的
+            校园网里连不上，就会"什么网页都打不开"。开启后：检测到系统代理先自动关闭，
+            再走认证。
+          </div>
+          <div class="row" style="margin-top:16px;justify-content:space-between">
+            <div>
+              <div style="font-size:13px;font-weight:600">认证前自动关闭系统代理</div>
+              <div class="card-sub" style="margin-top:4px">
+                只关 Windows 系统代理与 PAC，不结束代理软件进程；认证成功后不自动恢复
+              </div>
+            </div>
+            <div class="switch" id="swProxyGuard"></div>
+          </div>
+          <div class="comp-row" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+            <div class="comp-info">
+              <div class="comp-name">当前系统代理</div>
+              <div class="comp-sub" id="proxyDetail">—</div>
+            </div>
+            <span class="comp-state" id="proxyState">—</span>
+          </div>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn btn-ghost" id="btnProxyOff">立即关闭代理</button>
+            <button class="btn btn-ghost" id="btnProxyRestore">恢复关闭前的设置</button>
+            <span class="hint" id="proxyBackupHint"></span>
+          </div>
+        </div>
+
+        <div class="card">
           <div class="card-title">程序维护</div>
           <div class="card-sub">自启、守护、界面由同一个 exe 承担，无需安装额外组件</div>
           <div class="comp-row">
@@ -1487,6 +1537,7 @@ function setService(v){
 
 /* ---------- 开关 ---------- */
 let swAutoVal = false;
+let swProxyGuardVal = true;   // true = proxy_guard 为 auto
 let deployBannerDone = false;
 $('#swAuto').onclick = async () => {
   const want = !swAutoVal;
@@ -1496,6 +1547,30 @@ $('#swAuto').onclick = async () => {
     toast(r.message || (want ? '已开启开机自启' : '已关闭开机自启'), 3600);
     load();
   } else toast((r && r.message) || '操作失败', 3200);
+};
+
+/* 系统代理守卫开关：只是改 config.json 的 proxy_guard，不动注册表 */
+$('#swProxyGuard').onclick = async () => {
+  const want = !swProxyGuardVal;
+  const r = await post('/api/config', {proxy_guard: want ? 'auto' : 'off'});
+  if (r && r.ok){
+    toast(want ? '已开启代理守卫：认证前会自动关闭系统代理'
+               : '已关闭代理守卫：程序不再碰你的代理设置');
+    load();
+  } else toast('保存失败', 3200);
+};
+$('#btnProxyOff').onclick = async () => {
+  const r = await post('/api/proxy/off', {});
+  if (r && r.ok){
+    toast(r.changed ? '系统代理已关闭' : '当前没有开启的系统代理，无需处理');
+    load();
+  } else toast('关闭失败，详见日志', 3600);
+};
+$('#btnProxyRestore').onclick = async () => {
+  const r = await post('/api/proxy/restore', {});
+  toast(r && r.ok ? '已恢复关闭前的代理设置'
+                  : (r && r.message) || '没有可恢复的代理设置', 3600);
+  load();
 };
 
 /* ---------- 状态刷新 ---------- */
@@ -1528,6 +1603,22 @@ async function load(){
   $('#stSvc').textContent = (st.info && st.info.service) || st.service || '—';
   $('#stIp').textContent = (st.info && st.info.userIp) || '—';
   $('#stAuto').textContent = st.autostart ? '已启用' : '未启用';
+
+  /* ---- 系统代理守卫 ---- */
+  swProxyGuardVal = (st.proxy_guard !== 'off');
+  $('#swProxyGuard').classList.toggle('on', swProxyGuardVal);
+  const px = st.proxy || {};
+  const pxStateEl = $('#proxyState');
+  pxStateEl.textContent = px.active ? '已开启' : '未开启';
+  pxStateEl.className = 'comp-state ' + (px.active ? 'warn' : 'ok');
+  $('#proxyDetail').textContent = px.detail || '—';
+  // 有备份才能恢复；按钮状态跟着走，避免点了没反应
+  const pb = st.proxy_backup;
+  $('#btnProxyRestore').disabled = !pb;
+  $('#proxyBackupHint').textContent = pb
+    ? ('已记录 ' + (pb.t || '') + ' 关闭前的设置，可一键恢复')
+    : (px.active ? '关闭前会自动备份原设置' : '');
+
   const stD = $('#stDaemon');
   stD.textContent = st.daemon ? '运行中' : '已停止';
   stD.className = 'stat-value ' + (st.daemon ? 'ok' : '');

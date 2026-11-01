@@ -136,7 +136,9 @@ _MEI_CLEANED = _cleanup_stale_mei()
 #         配置值校验、自启/升级相关日志措辞）
 #         + 更新检查结果落盘 / 在线自动补查 / 界面与 CLI 透出远端版本
 # 0.6.2 = 「检查更新」支持一键下载并升级（资产 SHA256 + 版本校验，仅限本仓库）
-APP_VERSION = "0.6.2"
+# 0.6.3 = 系统代理守卫：开机/认证前检测到系统代理（含 PAC）先自动关闭，
+#         避免"关机前开着梯子→开机后代理仍是开的→什么网页都打不开"
+APP_VERSION = "0.6.3"
 GITHUB_REPO = "Origin-XiChen/campus-net-auth"
 GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
 GITHUB_API_LATEST = ("https://api.github.com/repos/%s/releases/latest"
@@ -200,6 +202,10 @@ DEFAULT_CONFIG = {
     # 之后指纹不一致即拒发凭据，防伪装门户/同 IP 中间人窃密。
     # 学校更换密钥后需删除 state.json 的 portal_pubkey_fp 字段重新锚定。
     "pin_pubkey": True,
+    # 系统代理守卫：开机/认证前检测到系统代理（含 PAC）先关掉，否则代理
+    # 客户端连不上节点时"什么网页都打不开"，本程序也探测不到网络。
+    # "auto"=自动关闭（默认，不自动恢复）；"off"=完全不碰，自己管理代理。
+    "proxy_guard": "auto",
     "log_level": "INFO",
 }
 
@@ -1329,6 +1335,9 @@ def _sanitize_config(cfg):
     # 布尔项容错（用户手写 JSON 可能写成字符串 "false"）
     v = cfg.get("pin_pubkey", True)
     cfg["pin_pubkey"] = v if isinstance(v, bool) else True
+    # 代理守卫：只接受 auto/off，其它值（含手写错的）一律回退 auto
+    pg = str(cfg.get("proxy_guard") or "auto").strip().lower()
+    cfg["proxy_guard"] = pg if pg in ("auto", "off") else "auto"
     return cfg
 
 
@@ -1572,6 +1581,263 @@ def record_event(kind, msg):
             evs.append({"t": now, "kind": kind, "msg": msg})
         st["events"] = evs[-8:]
         save_state(st)
+
+
+# ============================ 系统代理守卫 ============================
+# 场景：关机前开着代理（Clash / v2ray / 各种"梯子"），开机后代理客户端随登录
+# 自启动，**系统代理（WinINET）仍是开着的**。此时浏览器/HTTP 客户端全部走
+# 127.0.0.1:<port>，而代理客户端的节点多半连不上（校园网还没认证、或节点本
+# 身被墙），于是"什么网页都打不开"，本程序的公网探测也全军覆没。
+#
+# 本模块只做**最小必要的事**：把 WinINET 的系统代理开关与 PAC 地址关掉。
+#   * 不改代理客户端的任何配置文件、不结束其进程（TUN 模式不在处理范围）；
+#   * 关之前先把原值记进 state.json（proxy_backup），可随时一键恢复；
+#   * 只关"确实开着"的，没开就一个字节都不写（幂等，守护每轮调用也无害）；
+#   * 所有失败都静默降级——代理清理只是**辅助**，绝不能反过来阻塞认证。
+#
+# 注意：这里改的是 HKCU\...\Internet Settings，属于**当前用户**设置，不需要
+# 管理员权限；改完必须调 InternetSetOption 让系统重新读取，否则已运行的程序
+# 仍持有旧的代理配置（浏览器新标签页会受影响）。
+
+INTERNET_SETTINGS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+_INTERNET_OPTION_SETTINGS_CHANGED = 39
+_INTERNET_OPTION_REFRESH = 37
+# winreg 的 REG_DWORD 常量（非 Windows 上 winreg 不存在，故不能直接 import；
+# 该值在 Win32 里是固定 4，写成常量可让本模块在非 Windows 上也能被导入）
+_REG_DWORD = 4
+
+
+def _inet_settings_key(write=False):
+    """打开 HKCU 的 Internet Settings 键（非 Windows / 打不开返回 None）。"""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+        return winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, INTERNET_SETTINGS_KEY, 0,
+            winreg.KEY_READ | (winreg.KEY_SET_VALUE if write else 0))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _inet_read(name):
+    """读一个 Internet Settings 值；不存在或读失败返回 None。"""
+    k = _inet_settings_key()
+    if k is None:
+        return None
+    try:
+        import winreg
+        with k:
+            return winreg.QueryValueEx(k, name)[0]
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _inet_read_typed(name):
+    """读值 + 类型，返回 (value, type)；读不到返回 (None, None)。
+
+    ⚠️ 写回时必须沿用原类型：`ProxyEnable` 是 REG_DWORD，若按 REG_SZ 去写
+    会因类型不匹配**静默失败**（SetValueEx 抛异常 → 我们吞掉 → 表现成
+    "说关闭成功，其实开关还是 1"）。这是自测时抓到的真实 bug。
+    """
+    k = _inet_settings_key()
+    if k is None:
+        return None, None
+    try:
+        import winreg
+        with k:
+            v, t = winreg.QueryValueEx(k, name)
+            return v, t
+    except FileNotFoundError:
+        return None, None
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _inet_write(name, value, kind=None):
+    """写/删一个 Internet Settings 值。value=None 表示删除。返回是否成功。"""
+    try:
+        import winreg
+        if value is None:
+            k = _inet_settings_key(write=True)
+            if k is None:
+                return False
+            with k:
+                try:
+                    winreg.DeleteValue(k, name)
+                except FileNotFoundError:
+                    pass
+            return True
+        k = _inet_settings_key(write=True)
+        if k is None:
+            return False
+        with k:
+            winreg.SetValueEx(k, name, 0,
+                              kind if kind is not None else winreg.REG_SZ,
+                              value)
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.debug("写注册表 %s 失败: %r", name, e)
+        return False
+
+
+def _inet_notify_changed():
+    """通知系统"Internet 选项已变"，让新连接立即采用新代理设置。
+
+    不做这一步的后果：注册表改了，但 WinINET 的进程内缓存仍是旧值，
+    浏览器里已打开的会话继续走死代理——用户会觉得"程序说关了但没用"。
+    纯 ctypes，失败静默（只是让改动"延后生效"，不影响正确性）。
+    """
+    if os.name != "nt":
+        return
+    try:
+        wininet = ctypes.windll.wininet
+        for opt in (_INTERNET_OPTION_SETTINGS_CHANGED, _INTERNET_OPTION_REFRESH):
+            wininet.InternetSetOptionW(None, opt, None, 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def proxy_state():
+    """读取当前系统代理状态。
+
+    返回 dict：
+      enabled   —— ProxyEnable 是否为 1
+      server    —— ProxyServer 字符串（可能为 ""）
+      pac       —— AutoConfigURL（PAC 脚本地址，可能为 ""）
+      pac_wpad  —— AutoDetect 是否为 1（WPAD 自动发现）
+      active    —— 是否存在任何会被劫持流量的代理配置
+      detail    —— 给人看的一句话
+
+    active 的判定：ProxyEnable=1 或 配了 PAC。WPAD 单独列出来但**不算
+    active**——它是"自动发现"，校园网环境下通常无害，且强关它影响面更大。
+    """
+    pe = _inet_read("ProxyEnable")
+    ps = _inet_read("ProxyServer") or ""
+    pac = _inet_read("AutoConfigURL") or ""
+    wpad = _inet_read("AutoDetect")
+    enabled = bool(int(pe)) if isinstance(pe, int) else False
+    active = enabled or bool(pac)
+    bits = []
+    if enabled:
+        bits.append("系统代理已开启" + ("（%s）" % ps if ps else ""))
+    if pac:
+        bits.append("PAC 自动配置：" + str(pac)[:120])
+    if not active:
+        bits.append("未启用系统代理")
+    detail = "；".join(bits)
+    return {"enabled": enabled, "server": str(ps), "pac": str(pac),
+            "pac_wpad": (bool(int(wpad)) if isinstance(wpad, int) else False),
+            "active": active, "detail": detail}
+
+
+def disable_system_proxy(reason="开机自动认证前清理代理", record=True):
+    """关闭系统代理与 PAC（幂等）。
+
+    返回 dict：
+      changed  —— 是否真的改动了注册表（False = 本来就没开 / 改失败）
+      before   —— 关闭前的状态快照（用于恢复）
+      ok       —— 是否成功（没有需要改的也算成功）
+
+    原值写入 state.json 的 proxy_backup（仅首次，避免被"已关后的空值"覆盖）。
+    record=True 时写 state.json；测试里传 False 可避免触碰真实状态文件。
+    """
+    st = proxy_state()
+    out = {"changed": False, "before": st, "ok": True, "reason": reason}
+    if not st["active"]:
+        return out  # 本来就是干净的：一个字节都不写
+
+    if record:
+        try:
+            with _state_lock():
+                s = load_state()
+                if not s.get("proxy_backup"):
+                    s["proxy_backup"] = {
+                        "t": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "ProxyEnable": int(bool(st["enabled"])),
+                        "ProxyServer": st["server"],
+                        "AutoConfigURL": st["pac"],
+                        "reason": reason,
+                    }
+                    save_state(s)
+        except Exception as e:  # noqa: BLE001
+            log.debug("备份代理设置失败（继续关闭）: %r", e)
+
+    ok = True
+    if st["enabled"]:
+        # ProxyEnable 必须是 REG_DWORD：按字符串写会因类型不匹配而失败
+        ok = _inet_write("ProxyEnable", 0, _REG_DWORD) and ok
+    if st["pac"]:
+        # AutoConfigURL 是字符串，删除（不能写成空串，空串仍算"配了 PAC"）
+        ok = _inet_write("AutoConfigURL", None) and ok
+    _inet_notify_changed()
+
+    out["changed"] = True
+    out["ok"] = ok
+    if ok:
+        log.info("已关闭系统代理（%s）%s", reason,
+                 "｜原设置已备份，可随时恢复" if record else "")
+    else:
+        log.warning("关闭系统代理部分失败（%s）", reason)
+    return out
+
+
+def restore_system_proxy():
+    """把 disable_system_proxy 备份的原设置写回去。返回 (ok, detail)。
+
+    读不到备份说明从来没关过，直接返回 (False, "没有可恢复的代理设置")。
+    恢复成功即清掉备份，避免反复覆盖用户后来手动改的设置。
+    """
+    with _state_lock():
+        s = load_state()
+        bak = s.get("proxy_backup")
+    if not bak:
+        return False, "没有可恢复的代理设置（未记录过关闭前的状态）"
+    ok = True
+    try:
+        pe = int(bak.get("ProxyEnable") or 0)
+    except (TypeError, ValueError):
+        pe = 0
+    ps = bak.get("ProxyServer") or ""
+    pac = bak.get("AutoConfigURL") or ""
+    # 恢复同样要按原类型写：ProxyEnable 用 REG_DWORD，其余用 REG_SZ
+    ok = _inet_write("ProxyEnable", 1 if pe else 0, _REG_DWORD) and ok
+    if ps:
+        ok = _inet_write("ProxyServer", ps) and ok
+    if pac:
+        ok = _inet_write("AutoConfigURL", pac) and ok
+    _inet_notify_changed()
+    if ok:
+        with _state_lock():
+            s2 = load_state()
+            s2.pop("proxy_backup", None)
+            save_state(s2)
+        log.info("系统代理已恢复")
+        return True, "已恢复关闭前的代理设置"
+    return False, "恢复代理设置失败，详见日志"
+
+
+def maybe_clear_proxy(cfg=None, reason="开机自动认证前清理代理"):
+    """按配置决定是否清理代理（守护/once/login 的统一入口）。
+
+    cfg 缺省时读磁盘配置。配置项 proxy_guard：
+      * "auto"（默认）—— 检测到系统代理就关掉；
+      * "off"          —— 完全不碰代理（想自己管理的人用）。
+    返回 disable_system_proxy 的结果；被禁用时返回 changed=False。
+    任何异常都吞掉：清理代理是辅助步骤，绝不能反过来把认证搞挂。
+    """
+    try:
+        if cfg is None:
+            cfg = load_config()
+        mode = str((cfg or {}).get("proxy_guard", "auto")).lower()
+        if mode == "off":
+            return {"changed": False, "ok": True, "skipped": True}
+        return disable_system_proxy(reason=reason)
+    except Exception as e:  # noqa: BLE001
+        log.debug("代理守卫失败（已忽略）: %r", e)
+        return {"changed": False, "ok": False, "error": "%r" % e}
 
 
 # ============================ 系统通知（右下角） ============================
@@ -2986,6 +3252,21 @@ def run_daemon(cfg, cred):
     write_pid()
     atexit.register(remove_pid)
 
+    # 开机后第一件事：清理系统代理。
+    # 关机前若开着代理，开机后代理客户端随登录自启、系统代理仍是开着的，
+    # 而它的节点在未认证的网络里连不上 → 所有 HTTP 全走死代理 → 本程序
+    # 的公网探测全部失败、浏览器"什么网页都打不开"。必须在第一轮探测
+    # **之前**处理，否则守护会先被误导成"网络不可达"而退避。
+    # 只关 WinINET 系统代理与 PAC，不结束代理客户端进程，也不自动恢复。
+    proxy_guard_done = False
+    try:
+        _pg = maybe_clear_proxy(cfg, reason="守护启动：开机后清理系统代理")
+        proxy_guard_done = bool(_pg.get("changed"))
+        if proxy_guard_done:
+            record_event("proxy", "开机检测到系统代理已开启，已自动关闭以保证认证可达")
+    except Exception as e:  # noqa: BLE001
+        log.debug("启动时清理代理失败（已忽略）: %r", e)
+
     client = PortalClient(cfg)
     username = cfg["username"]
     interval = int(cfg.get("interval", 30))
@@ -3143,7 +3424,27 @@ def run_daemon(cfg, cred):
             # （在线路径每轮从 4 次 HTTP 降到 3 次并发）。
             # 校外网络（家里/热点/公共 WiFi）门户不可达，守护静默等待、绝不认证。
             if not portal_ok:
-                if not client.portal_reachable():
+                reachable = client.portal_reachable()
+                if not reachable:
+                    # 门户不可达时先排除"软性原因"：用户中途又把系统代理打开了
+                    # （代理客户端自愈、开机延迟启动的托盘程序重新写入等）。
+                    # 这种情况下的"门户不可达"是假象，清掉代理后立刻重探一次，
+                    # 命中就完全跳过退避——不必白等一个离线周期。
+                    # maybe_clear_proxy 幂等：本来就没开时代价只是一次注册表读。
+                    try:
+                        if maybe_clear_proxy(
+                                cfg, reason="门户不可达：复核系统代理"
+                        ).get("changed"):
+                            record_event(
+                                "proxy",
+                                "门户不可达时检测到系统代理被重新开启，已关闭并立即复核")
+                            if client.portal_reachable():
+                                log.info("关闭系统代理后门户恢复可达，立即认证")
+                                reachable = True
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("门户不可达时复查代理失败（已忽略）: %r", e)
+
+                if not reachable:
                     wait = min(offline_interval * min(fail_streak + 1, 10),
                                max_interval)
                     if fail_streak == 0:
@@ -3885,6 +4186,9 @@ def cmd_login(args):
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码，请先运行: campusnet.py setup")
         return 1
+    # 手动登录同样先清代理：用户点「立即连接」时，系统代理开着一模一样会
+    # 让 check_online 误判成"未认证"、让 login 拿不到登录页。
+    maybe_clear_proxy(cfg, reason="立即登录前清理系统代理")
     client = PortalClient(cfg)
 
     if not getattr(args, "force", False):
@@ -3945,6 +4249,8 @@ def cmd_once(args):
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码")
         return 1
+    # 单次检测常用于"任务计划开机跑一次"，和守护走同一条代理守卫
+    maybe_clear_proxy(cfg, reason="单次检测前清理系统代理")
     client = PortalClient(cfg)
     online, login_page = client.check_authentication()
     if online:
@@ -4178,6 +4484,53 @@ def cmd_logout(args):
     return 2
 
 
+def cmd_proxy(args):
+    """查看 / 关闭 / 恢复系统代理（开机自动认证的配套工具）。
+
+    用法：
+      campusnet.py proxy            # 查看当前状态
+      campusnet.py proxy --off      # 关闭系统代理与 PAC（备份原值）
+      campusnet.py proxy --restore  # 恢复上次关闭前的设置
+    """
+    if getattr(args, "restore", False):
+        ok, msg = restore_system_proxy()
+        # 用中文而非 ✓/✗：GBK 控制台下 ✓(U+2713) 无法编码会抛异常
+        print(("恢复成功：" if ok else "恢复失败：") + msg)
+        return 0 if ok else 1
+    if getattr(args, "off", False):
+        r = disable_system_proxy(reason="命令行指定")
+        before = r.get("before") or {}
+        if not before.get("active"):
+            print("当前未启用系统代理，无需处理")
+            return 0
+        print("关闭前：" + str(before.get("detail", "")))
+        print("已关闭系统代理" if r.get("ok")
+              else "关闭系统代理失败，详见日志")
+        return 0 if r.get("ok") else 1
+
+    st = proxy_state()
+    cfg = load_config()
+    print("=" * 58)
+    print(" 系统代理状态")
+    print("=" * 58)
+    print("当前状态  : %s" % ("已开启" if st["active"] else "未开启"))
+    print("详细      : %s" % st["detail"])
+    print("代理服务器: %s" % (st["server"] or "（未设置）"))
+    print("PAC 地址  : %s" % (st["pac"] or "（未设置）"))
+    print("自动发现  : %s" % ("已启用（WPAD）" if st["pac_wpad"] else "未启用"))
+    print("守卫开关  : %s（config.json 的 proxy_guard）"
+          % cfg.get("proxy_guard", "auto"))
+    bak = load_state().get("proxy_backup")
+    if bak:
+        print("关闭前备份: %s（原因：%s）"
+              % (bak.get("t", "?"), bak.get("reason", "?")))
+        print("           可用 `proxy --restore` 恢复")
+    else:
+        print("关闭前备份: 无（说明从未由本程序关闭过代理）")
+    print("=" * 58)
+    return 0
+
+
 def cmd_diagnose(args):
     """门户抓取诊断（常驻监控 + 自动取证）。
 
@@ -4277,12 +4630,21 @@ def cmd_ui(args):
     # 注意：desktop.main() 阻塞直到窗口关闭；仅当 pywebview 缺失或
     # WebView2 初始化失败时才快速返回/抛异常 → 回退 tkinter。
     try:
-        import desktop  # 延迟导入：守护进程不需要加载 pywebview
-        with open(os.path.join(BASE_DIR, "_ui_trace.log"), "a",
-                  encoding="utf-8") as f:
-            f.write("import desktop OK; calling desktop.main()\n")
-        desktop.main()
-        return 0
+        # desktop.main() 自带 argparse（只认 --dev）。开发态用
+        # `python campusnet.py ui` 进来时，sys.argv 里还留着 "ui" 这个子命令，
+        # 会被它当成非法参数直接 SystemExit(2) —— 表现为"界面一启动就退出"。
+        # 这里在调用前把 argv 裁成"只有程序名"，退出后再恢复（不留副作用）。
+        _saved_argv = sys.argv
+        sys.argv = [sys.argv[0]]
+        try:
+            import desktop  # 延迟导入：守护进程不需要加载 pywebview
+            with open(os.path.join(BASE_DIR, "_ui_trace.log"), "a",
+                      encoding="utf-8") as f:
+                f.write("import desktop OK; calling desktop.main()\n")
+            desktop.main()
+            return 0
+        finally:
+            sys.argv = _saved_argv
     except Exception as e:
         try:
             with open(os.path.join(BASE_DIR, "_ui_trace.log"), "a",
@@ -4291,6 +4653,7 @@ def cmd_ui(args):
         except Exception:
             pass
     # ---- tkinter 回退 ----
+    sys.argv = [sys.argv[0]]  # ui.py 的 main() 同样不该看到 "ui" 子命令
     try:
         import ui  # 延迟导入：守护进程不需要加载 tkinter
         with open(os.path.join(BASE_DIR, "_ui_trace.log"), "a",
@@ -4451,6 +4814,13 @@ def main():
                         help="只跑 N 轮就出报告（内部自测用）")
     p_diag.set_defaults(func=cmd_diagnose)
     sub.add_parser("test", help="自检").set_defaults(func=cmd_test)
+    p_proxy = sub.add_parser("proxy",
+                             help="查看/关闭/恢复系统代理（开机自动认证配套）")
+    p_proxy.add_argument("--off", action="store_true",
+                         help="关闭系统代理与 PAC（先备份原值）")
+    p_proxy.add_argument("--restore", action="store_true",
+                         help="恢复上次关闭前的代理设置")
+    p_proxy.set_defaults(func=cmd_proxy)
     p_up = sub.add_parser("upgrade",
                           help="就地升级到程序目录里的新版本并重启守护")
     p_up.add_argument("--check", action="store_true",
