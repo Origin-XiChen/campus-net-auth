@@ -39,6 +39,7 @@ class DaemonReplay:
         self.log = mock.Mock()
         self.logout = mock.Mock(return_value=(True, "TEST-ONLY"))
         self.notifications = mock.Mock()
+        self.events = mock.Mock()
         self.outcome = None
 
     def probe(self):
@@ -71,7 +72,7 @@ class DaemonReplay:
                 "_start_addr_change_watcher": mock.Mock(),
                 "update_state": mock.Mock(), "save_state": mock.Mock(),
                 "load_state": mock.Mock(return_value={}),
-                "record_event": mock.Mock(), "self_exe_path": mock.Mock(return_value="TEST-EXE"),
+                "record_event": self.events, "self_exe_path": mock.Mock(return_value="TEST-EXE"),
                 "logout_stale_session": self.logout,
                 "notify_system": self.notifications, "log": self.log,
                 # 代理守卫：回放测试不碰真实注册表，也不许它改测试机上的代理
@@ -319,7 +320,9 @@ class TestAuthenticationStatus(unittest.TestCase):
                 result = self.client.login("dummy-user", "dummy-password",
                                            login_page=(self.url, html))
             self.assertEqual(result["result"], "fail")
-            request.assert_not_called()
+            # 密码没发出去（向 pageInfo 核实加密参数不携带凭据）
+            self.assertFalse([c for c in request.call_args_list
+                              if "method=login" in str(c)])
 
     def test_http_200_without_challenge_never_submits_credentials(self):
         paths = []

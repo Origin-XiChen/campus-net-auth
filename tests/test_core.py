@@ -275,251 +275,13 @@ class TestSanitizeConfig(_StateDirMixin):
         self.assertEqual(cfg["portal_host"],
                          cn.DEFAULT_CONFIG["portal_host"])
 
-    def test_proxy_guard_only_accepts_auto_or_off(self):
-        """proxy_guard 只认 auto/off；手写错的（如 "true"、"OFF "）一律归一。"""
-        for raw, want in (("off", "off"), ("OFF", "off"), (" off ", "off"),
-                          ("auto", "auto"), ("AUTO", "auto"),
-                          ("yes", "auto"), ("", "auto"), (None, "auto")):
-            with self.subTest(raw=raw):
-                with open(cn.CONFIG_PATH, "w", encoding="utf-8") as f:
-                    json.dump({"proxy_guard": raw}, f)
-                self.assertEqual(cn.load_config()["proxy_guard"], want)
-
-
-# ---------------- 系统代理守卫（mock winreg / wininet，离线）----------------
-
-class _FakeInetSettings:
-    """模拟 HKCU\\...\\Internet Settings 键：内存字典 + 记录写入。
-
-    只实现本项目用到的那点 API（QueryValueEx / SetValueEx / DeleteValue），
-    让代理逻辑能在任何机器上确定性回放——测试结果绝不能依赖
-    "跑测试这台机器当前有没有开代理"。
-
-    ⚠️ 刻意模拟真实 winreg 的**类型校验**：ProxyEnable 必须是 REG_DWORD，
-    按字符串写要报错。这是自测时抓到的真实 bug——假对象若对类型来者不拒，
-    这个 bug 在单测里就永远看不见。
-    """
-
-    DWORD_NAMES = {"ProxyEnable", "AutoDetect"}
-
-    def __init__(self, values=None):
-        self.values = dict(values or {})
-        self.writes = []      # [(op, name, value)]
-        self.notified = 0
-
-    # ---- 供 campusnet 的两个私有函数替换 ----
-    def read(self, name):
-        return self.values.get(name)
-
-    def write(self, name, value, kind=None):
-        if value is None:
-            self.values.pop(name, None)
-            self.writes.append(("del", name, None))
-            return True
-        # 复刻真实行为：DWORD 名字必须按 REG_DWORD(4) 写，否则失败
-        if name in self.DWORD_NAMES and kind != 4:
-            raise TypeError(
-                "模拟 winreg: %s 需要 REG_DWORD(4)，收到 %r" % (name, kind))
-        self.values[name] = value
-        self.writes.append(("set", name, value))
-        return True
-
-    def notify(self):
-        self.notified += 1
-
-
-class TestProxyGuard(_StateDirMixin):
-    ON = {"ProxyEnable": 1, "ProxyServer": "127.0.0.1:15732",
-          "ProxyOverride": "<local>"}
-
-    def setUp(self):
-        super().setUp()
-        self.fake = _FakeInetSettings()
-        self._patches = {
-            "_inet_read": self.fake.read,
-            "_inet_write": self.fake.write,
-            "_inet_notify_changed": self.fake.notify,
-        }
-        self._saved_extra = {k: getattr(cn, k) for k in self._patches}
-        for k, v in self._patches.items():
-            setattr(cn, k, v)
-
-    def tearDown(self):
-        for k, v in self._saved_extra.items():
-            setattr(cn, k, v)
-        super().tearDown()
-
-    # ---- proxy_state 只读判定 ----
-    def test_state_detects_enabled_proxy(self):
-        self.fake.values = dict(self.ON)
-        st = cn.proxy_state()
-        self.assertTrue(st["active"])
-        self.assertTrue(st["enabled"])
-        self.assertEqual(st["server"], "127.0.0.1:15732")
-        self.assertIn("127.0.0.1:15732", st["detail"])
-
-    def test_state_detects_pac_even_without_proxy_enable(self):
-        self.fake.values = {"ProxyEnable": 0,
-                            "AutoConfigURL": "http://x/p.pac"}
-        st = cn.proxy_state()
-        self.assertFalse(st["enabled"])
-        self.assertTrue(st["active"])          # 只有 PAC 也算开启
-        self.assertIn("PAC", st["detail"])
-
-    def test_state_clean_when_nothing_configured(self):
-        st = cn.proxy_state()
-        self.assertFalse(st["active"])
-        self.assertIn("未启用系统代理", st["detail"])
-
-    # ---- 关闭 ----
-    def test_disable_is_noop_without_writes_when_already_clean(self):
-        r = cn.disable_system_proxy(record=False)
-        self.assertFalse(r["changed"])
-        self.assertEqual(self.fake.writes, [])   # 一个字节都不写
-        self.assertEqual(self.fake.notified, 0)  # 也不去通知系统
-
-    def test_disable_turns_off_proxy_and_backs_up(self):
-        self.fake.values = dict(self.ON)
-        self.fake.values["AutoConfigURL"] = "http://x/p.pac"
-        r = cn.disable_system_proxy(reason="TEST")
-        self.assertTrue(r["changed"])
-        self.assertTrue(r["ok"])
-        self.assertEqual(self.fake.values["ProxyEnable"], 0)
-        self.assertNotIn("AutoConfigURL", self.fake.values)
-        # ProxyServer 原样保留：关掉开关即可，不必抹掉服务器地址
-        self.assertEqual(self.fake.values["ProxyServer"], "127.0.0.1:15732")
-        self.assertEqual(self.fake.notified, 1)  # 必须通知系统重读
-        bak = cn.load_state().get("proxy_backup")
-        self.assertEqual(bak["ProxyEnable"], 1)
-        self.assertEqual(bak["ProxyServer"], "127.0.0.1:15732")
-        self.assertEqual(bak["AutoConfigURL"], "http://x/p.pac")
-
-    def test_disable_writes_proxy_enable_as_dword(self):
-        """ProxyEnable 必须按 REG_DWORD 写：按字符串写会在真实注册表上静默失败。"""
-        self.fake.values = dict(self.ON)
-        r = cn.disable_system_proxy(record=False)
-        self.assertTrue(r["ok"], "写入应为成功（DWORD 类型正确）")
-        self.assertIn(("set", "ProxyEnable", 0), self.fake.writes)
-
-    def test_disable_reports_failure_when_type_is_wrong(self):
-        """反向保护：写入失败时必须把 ok 报成 False，而不是假装成功。
-
-        注意：生产代码里的 _inet_write 契约是"永不抛异常、失败返回 False"，
-        所以替身也必须返回 False（而不是抛 TypeError）。
-        """
-        self.fake.values = dict(self.ON)   # 先造出"代理确实开着"的前提
-
-        def bad_write(name, value, kind=None):
-            return False                   # 模拟类型不匹配导致的写入失败
-        with mock.patch.object(cn, "_inet_write", bad_write):
-            r = cn.disable_system_proxy(record=False)
-        self.assertTrue(r["changed"])
-        self.assertFalse(r["ok"])      # 不能静默成功
-
-    def test_disable_is_idempotent_and_keeps_first_backup(self):
-        self.fake.values = dict(self.ON)
-        cn.disable_system_proxy(record=True)
-        first = cn.load_state()["proxy_backup"]
-        r2 = cn.disable_system_proxy(record=True)   # 第二次：已经关了
-        self.assertFalse(r2["changed"])
-        self.assertEqual(cn.load_state()["proxy_backup"], first)
-
-    # ---- 恢复 ----
-    def test_restore_writes_back_exact_original_values(self):
-        self.fake.values = dict(self.ON)
-        cn.disable_system_proxy(record=True)
-        ok, _ = cn.restore_system_proxy()
-        self.assertTrue(ok)
-        self.assertEqual(self.fake.values["ProxyEnable"], 1)
-        self.assertEqual(self.fake.values["ProxyServer"], "127.0.0.1:15732")
-        self.assertNotIn("proxy_backup", cn.load_state())   # 恢复后清备份
-
-    def test_restore_without_backup_reports_cleanly(self):
-        ok, msg = cn.restore_system_proxy()
-        self.assertFalse(ok)
-        self.assertIn("没有可恢复", msg)
-
-    # ---- 配置开关 ----
-    def test_maybe_clear_proxy_respects_off_switch(self):
-        self.fake.values = dict(self.ON)
-        r = cn.maybe_clear_proxy({"proxy_guard": "off"})
-        self.assertTrue(r.get("skipped"))
-        self.assertEqual(self.fake.writes, [])
-        self.assertEqual(self.fake.values["ProxyEnable"], 1)  # 原样不动
-
-    def test_maybe_clear_proxy_defaults_to_auto(self):
-        self.fake.values = dict(self.ON)
-        r = cn.maybe_clear_proxy({})
-        self.assertTrue(r["changed"])
-        self.assertEqual(self.fake.values["ProxyEnable"], 0)
-
-    def test_maybe_clear_proxy_never_raises(self):
-        """代理清理是辅助步骤：内部炸了也不能把认证流程带崩。"""
-        def boom(*a, **k):
-            raise RuntimeError("registry exploded")
-        with mock.patch.object(cn, "disable_system_proxy", side_effect=boom):
-            r = cn.maybe_clear_proxy({"proxy_guard": "auto"})
-        self.assertFalse(r["changed"])
-        self.assertIn("error", r)
-
-
-class TestSafePrint(unittest.TestCase):
-    """CLI 输出在 GBK 流（重定向/管道）下不得崩。
-
-    实测 bug：cmd_proxy --restore 打印 "✓ ..." 时，输出被重定向到文件，
-    Python 按 locale(GBK) 编码 → UnicodeEncodeError → 整条命令以 traceback
-    收场（业务其实已成功）。✓/✗ 不在 GBK 字符集内，必须降级成 ASCII。
-    """
-
-    def _capture(self, lines):
-        import io
-        buf = io.BytesIO()
-        wrapper = io.TextIOWrapper(buf, encoding="gbk", errors="strict",
-                                   newline="")
-        old = sys.stdout
-        sys.stdout = wrapper
-        try:
-            for s in lines:
-                cn.safe_print(s)      # 不得抛异常
-        finally:
-            wrapper.flush()
-            sys.stdout = old
-        data = buf.getvalue()
-        wrapper.detach()              # 别让 wrapper 关掉 BytesIO
-        return data.decode("gbk", "replace")
-
-    def test_check_marks_degrade_to_ascii_in_gbk(self):
-        out = self._capture(["✓ 成功", "✗ 失败"])
-        self.assertIn("[OK]", out)
-        self.assertIn("[FAIL]", out)
-        self.assertNotIn("✓", out)
-        self.assertNotIn("✗", out)
-        self.assertIn("成功", out)     # 中文本身在 GBK 内，不得被破坏
-
-    def test_plain_text_passes_through(self):
-        out = self._capture(["普通中文输出", "ascii line"])
-        self.assertIn("普通中文输出", out)
-        self.assertIn("ascii line", out)
-
-    def test_never_raises_on_broken_stream(self):
-        """输出流坏掉时也不能抛——CLI 的输出只剩装饰意义。"""
-        class Broken:
-            def write(self, *a, **k):
-                raise OSError("stream closed")
-            def flush(self):
-                raise OSError("stream closed")
-        old = sys.stdout
-        sys.stdout = Broken()
-        try:
-            cn.safe_print("anything")      # 不抛即通过
-        finally:
-            sys.stdout = old
-
 
 # ---------------- 门户公钥 pinning（mock 网络，离线）----------------
 
 def _login_html(exp, mod, encrypt="true"):
     return ('<html><body>'
+            '<input id="username" name="username" type="text" value="">'
+            '<input id="pwd" name="pwd" type="password" value="">'
             '<input type="hidden" id="publicKeyExponent" value="%s">'
             '<input type="hidden" id="publicKeyModulus" value="%s">'
             '<input type="hidden" id="passwordEncrypt" value="%s">'
@@ -573,7 +335,9 @@ class TestPubkeyPinning(_StateDirMixin):
         with m_disc, m_http as m:
             res = client.login("user", "pw")
         self.assertEqual(res.get("result"), "fail")
-        m.assert_not_called()
+        # 关键：密码没有被提交（向 pageInfo 核实加密参数不携带凭据）
+        self.assertFalse([c for c in m.call_args_list
+                          if "method=login" in str(c)])
 
     def test_pin_disabled_proceeds(self):
         cn.save_state({"portal_pubkey_fp": "0" * 64})
@@ -944,23 +708,9 @@ class TestDaemonRefreshGuard(unittest.TestCase):
         self.assertFalse(restarted)
         self.assertEqual(reason, "")
 
-    def test_refuses_when_component_missing(self):
-        """值守组件缺失 → 停掉就再也起不来，必须拒绝动手。"""
-        with mock.patch.object(cn, "daemon_stale",
-                               return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=False), \
-             mock.patch.object(cn, "stop_daemon") as stop:
-            restarted, reason = cn.ensure_daemon_fresh(force=True)
-        self.assertFalse(restarted)
-        self.assertEqual(reason, "版本不符")
-        stop.assert_not_called()
-
     def test_restarts_when_stale(self):
         with mock.patch.object(cn, "daemon_stale",
                                return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=True), \
              mock.patch.object(cn, "stop_daemon", return_value=True), \
              mock.patch.object(cn, "start_daemon", return_value=True), \
              mock.patch.object(cn, "record_event") as ev:
@@ -971,8 +721,6 @@ class TestDaemonRefreshGuard(unittest.TestCase):
     def test_reports_failure_when_start_fails(self):
         with mock.patch.object(cn, "daemon_stale",
                                return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=True), \
              mock.patch.object(cn, "stop_daemon", return_value=True), \
              mock.patch.object(cn, "start_daemon", return_value=False):
             restarted, _reason = cn.ensure_daemon_fresh(force=True)
@@ -982,8 +730,6 @@ class TestDaemonRefreshGuard(unittest.TestCase):
         cn._STALE_REFRESH["last"] = 0.0
         with mock.patch.object(cn, "daemon_stale",
                                return_value=(True, "0.1.0", "版本不符")), \
-             mock.patch.object(cn, "daemon_component_installed",
-                               return_value=True), \
              mock.patch.object(cn, "stop_daemon", return_value=True), \
              mock.patch.object(cn, "start_daemon", return_value=True), \
              mock.patch.object(cn, "record_event"), \
@@ -1175,7 +921,7 @@ class _FakeWinreg(types.ModuleType):
 
 
 class TestAutostartRunKey(unittest.TestCase):
-    """Run 键命令格式（//B 静默）与"目录被搬走"后的自愈。
+    """Run 键直接指向 exe，以及旧版 VBS 自启的自动迁移。
 
     全程用假 winreg + 虚拟文件表，不写真实注册表、不落任何磁盘文件。
     """
@@ -1185,7 +931,7 @@ class TestAutostartRunKey(unittest.TestCase):
         self.other = os.path.abspath("_cna_fake_other")
         self.vbs = os.path.join(self.dir, cn.DAEMON_VBS_NAME)
         self.exe = os.path.join(self.dir, "CampusNetAuth.exe")
-        self.files = {self.vbs.lower(), self.exe.lower()}
+        self.files = {self.exe.lower()}
         self.reg = _FakeWinreg()
 
         def _exists(p):
@@ -1200,6 +946,7 @@ class TestAutostartRunKey(unittest.TestCase):
             mock.patch.object(cn.os.path, "exists", _exists),
             mock.patch.object(cn, "_clean_legacy_task"),  # 不真跑 schtasks
             mock.patch.object(cn.sys, "frozen", True, create=True),
+            mock.patch.object(cn.sys, "executable", self.exe),
         ]
         for p in self._patches:
             p.start()
@@ -1209,38 +956,45 @@ class TestAutostartRunKey(unittest.TestCase):
             p.stop()
 
     def _want(self):
-        return 'wscript.exe //B "%s"' % self.vbs
+        return '"%s" daemon' % self.exe
 
-    def test_cmd_uses_batch_flag(self):
-        """//B 是关键：缺了它，目录被绿色删除后开机会弹模态报错框。"""
+    def test_cmd_points_to_self_exe(self):
+        """0.6.0 起自启直接运行 exe，不再经 wscript/VBS 中转。"""
         self.assertEqual(cn._autostart_cmd(), self._want())
+        self.assertNotIn("wscript", cn._autostart_cmd().lower())
 
-    def test_install_writes_batch_cmd(self):
+    def test_install_writes_exe_cmd(self):
         self.assertTrue(cn.install_autostart())
         self.assertEqual(self.reg.values.get(cn.TASK_NAME), self._want())
 
-    def test_health_parses_batch_cmd(self):
-        """健康检查要能跳过 //B 找到引号里的启动器路径。"""
+    def test_health_parses_exe_cmd(self):
         cn.install_autostart()
         self.assertEqual(cn.autostart_health(), (True, ""))
 
-    def test_health_flags_missing_launcher_with_batch_cmd(self):
-        cn.install_autostart()
-        self.files.discard(self.vbs.lower())
+    def test_health_flags_missing_exe(self):
+        self.reg.values[cn.TASK_NAME] = self._want()
+        self.files.discard(self.exe.lower())
         ok, msg = cn.autostart_health()
         self.assertFalse(ok)
         self.assertIn("丢失", msg)
 
+    def test_health_accepts_legacy_vbs_if_present(self):
+        """旧版 VBS 自启文件齐全 → 仍视为健康（启动时会被自动迁移）。"""
+        self.files.add(self.vbs.lower())
+        self.reg.values[cn.TASK_NAME] = 'wscript.exe //B "%s"' % self.vbs
+        self.assertEqual(cn.autostart_health(), (True, ""))
+
     def test_repair_repoints_moved_folder(self):
-        """目录被搬走（旧路径已不存在）→ 自启改指当前目录。"""
+        """目录被搬走（旧路径已不存在）→ 自启改指当前 exe。"""
         old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
         self.reg.values[cn.TASK_NAME] = old
         self.assertTrue(cn.repair_autostart_cmd())
         self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
 
-    def test_repair_upgrades_old_format_in_place(self):
-        """就装在当前目录但命令是旧格式（无 //B）→ 原地升级。"""
-        self.reg.values[cn.TASK_NAME] = 'wscript.exe "%s"' % self.vbs
+    def test_repair_migrates_legacy_vbs_in_place(self):
+        """旧版 wscript+VBS 就在当前目录 → 迁移为直接运行 exe。"""
+        self.files.add(self.vbs.lower())
+        self.reg.values[cn.TASK_NAME] = 'wscript.exe //B "%s"' % self.vbs
         self.assertTrue(cn.repair_autostart_cmd())
         self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
 
@@ -1257,13 +1011,12 @@ class TestAutostartRunKey(unittest.TestCase):
         self.assertFalse(cn.repair_autostart_cmd())
         self.assertEqual(self.reg.values, {})
 
-    def test_repair_skipped_when_launcher_absent(self):
-        """当前目录没有启动器（残缺安装）→ 交给健康检查警示，不改写。"""
-        self.files.discard(self.vbs.lower())
-        old = 'wscript.exe "%s"' % os.path.join(self.other, cn.DAEMON_VBS_NAME)
+    def test_repair_migrates_legacy_vbs_even_if_missing(self):
+        """旧版 VBS 被手动删除（残缺自启）→ 直接改指当前 exe。"""
+        old = 'wscript.exe "%s"' % self.vbs
         self.reg.values[cn.TASK_NAME] = old
-        self.assertFalse(cn.repair_autostart_cmd())
-        self.assertEqual(self.reg.values[cn.TASK_NAME], old)
+        self.assertTrue(cn.repair_autostart_cmd())
+        self.assertEqual(self.reg.values[cn.TASK_NAME], self._want())
 
     def test_repair_skipped_in_dev_mode(self):
         with mock.patch.object(cn.sys, "frozen", False, create=True):

@@ -25,6 +25,7 @@ import atexit
 import getpass
 import hashlib
 import socket
+import uuid
 import logging
 import argparse
 import shutil
@@ -32,6 +33,7 @@ import subprocess
 import threading
 import http.client
 import urllib.parse
+import urllib.request
 import contextlib
 import logging.handlers
 import concurrent.futures as _cf
@@ -128,9 +130,22 @@ _MEI_CLEANED = _cleanup_stale_mei()
 # 0.5.2 = 内置彻底卸载器（随界面自动释放）+ 守护停机/进程归属硬化
 # 0.5.3 = 公网探测无结论时的认证阻塞与退避修复（PR#3）+ 登录页发现优先重定向（PR#2）
 #         + 状态文案不再把"探测无结论"误报成"网络不可达"
-# 0.5.4 = 系统代理守卫：开机/认证前检测到系统代理（含 PAC）先自动关闭，
+# 0.6.0 = 自启/守护/界面合并为同一个 exe（不再释放 VBS 组件）+ Release 更新检查
+# 0.6.1 = 运行时清理与可观测性（.old.exe 不再堆积、下线不再被守护立刻登回、
+#         验证码/短信/CAS 给出结论而不是无限重试、累计计数落盘、MAC 按网卡取、
+#         配置值校验、自启/升级相关日志措辞）
+#         + 更新检查结果落盘 / 在线自动补查 / 界面与 CLI 透出远端版本
+# 0.6.2 = 「检查更新」支持一键下载并升级（资产 SHA256 + 版本校验，仅限本仓库）
+# 0.6.3 = 系统代理守卫：开机/认证前检测到系统代理（含 PAC）先自动关闭，
 #         避免"关机前开着梯子→开机后代理仍是开的→什么网页都打不开"
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.6.3"
+GITHUB_REPO = "Origin-XiChen/campus-net-auth"
+GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
+GITHUB_API_LATEST = ("https://api.github.com/repos/%s/releases/latest"
+                     % GITHUB_REPO)
+# Release 检查缓存：成功 6 小时、失败 5 分钟。只读网络，不自动下载。
+UPDATE_CHECK_TTL = 6 * 3600
+UPDATE_CHECK_FAIL_TTL = 300
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -160,6 +175,10 @@ DEFAULT_CONFIG = {
     "verify_interval": 5,
     # 校外/断网退避等待期间的环境快探间隔（秒）：恢复时即时响应（不等完整退避）
     "recheck_interval": 30,
+    # 手动「下线」后的静默期（秒）：用户显式下线意味着"我现在不想联网"，
+    # 守护在这段时间内不自动登录（仍会监控网络与心跳），避免"刚下线就被登回"。
+    # 0 = 关闭；执行 login（界面「立即连接」/CLI）会立即清除静默期。
+    "logout_pause": 600,
     # 连通性检测目标（HTTP，避免 HTTPS 证书干扰）
     "detect_targets": [
         {"host": "www.msftconnecttest.com", "path": "/connecttest.txt",
@@ -168,6 +187,17 @@ DEFAULT_CONFIG = {
          "expect": "Success"},
         {"host": "www.baidu.com", "path": "/", "expect": ""},
     ],
+    # 登录页兜底参数：未认证时若网关不做 302 劫持（DNS 直接黑洞）、门户根路径
+    # 又不给登录页，就只能按门户登记的"认证设备参数"自己拼出登录页 URL。
+    # 取值：浏览器登录一次，把地址栏 index.jsp? 后面的参数抄过来
+    # （wlanacname / nasip 必须与 SAM+ 里登记的 portal 设备一致，否则门户只会
+    # 回"WEB认证设备未注册"）。wlanuserip / wlanparameter 留空则用本机
+    # 当前 IPv4 与 MAC 自动填充。整项置空 {} 即关闭该兜底。
+    "login_page_hints": {
+        "wlanacname": "logic",
+        "nasip": "10.253.0.17",
+        "url": "",
+    },
     # 门户公钥 pinning（TOFU）：首次成功登录记录 RSA 公钥指纹到 state.json，
     # 之后指纹不一致即拒发凭据，防伪装门户/同 IP 中间人窃密。
     # 学校更换密钥后需删除 state.json 的 portal_pubkey_fp 字段重新锚定。
@@ -271,36 +301,6 @@ def force_utf8_console():
             k32.SetConsoleOutputCP(65001)
             k32.SetConsoleCP(65001)
     except Exception:
-        pass
-
-
-def safe_print(text):
-    """CLI 安全输出：遇到当前输出编码无法表示的字符时降级，而不是崩掉整个命令。
-
-    背景（实测 bug）：CLI 输出被重定向到文件/管道时，Python 按 locale 编码
-    （中文 Windows 上是 GBK）写 stdout，而 ✓ / ✗ / ← 这些符号**不在 GBK 里**
-    → 直接抛 UnicodeEncodeError，整条命令以 traceback 收场（用户看到的是
-    "命令崩了"，实际业务逻辑已经成功执行完）。
-
-    这里先尝试原样输出，失败则把这些装饰性符号换成等义 ASCII 再输出一次；
-    仍失败（极少见）则退化为忽略不可编码字符。**永不抛异常**——CLI 的输出
-    只剩装饰意义，不该反过来决定命令成败。
-    """
-    try:
-        print(text)
-        return
-    except UnicodeEncodeError:
-        pass
-    except Exception:  # noqa: BLE001
-        return  # 输出流本身坏了（如已关闭），静默忽略
-    _ASCII_FALLBACK = {"✓": "[OK]", "✗": "[FAIL]", "←": "<-", "→": "->",
-                       "…": "...", "●": "*", "○": "o"}
-    fallback = str(text)
-    for k, v in _ASCII_FALLBACK.items():
-        fallback = fallback.replace(k, v)
-    try:
-        print(fallback)
-    except Exception:  # noqa: BLE001
         pass
 
 
@@ -661,6 +661,158 @@ def parse_inputs(html):
     return result
 
 
+def looks_like_eportal_login(html):
+    """粗略判定一份 HTML 是否为锐捷 ePortal 的**学生**登录页。
+
+    为什么不能只看“有 pwd 字段”：门户根目录 `/eportal/` 也挂着一份
+    后台管理登录页（form action=./admin.do?method=login，同样有 pwd 与
+    publicKey），误认成登录页后会拿学生密码去提交管理台接口。这里要求
+    页面上真的存在登录表单的输入域，且不是管理台表单。
+    """
+    if not html:
+        return False
+    # 管理台登录表单（/eportal/ 上那份）：form action 指向 admin.do
+    if re.search(r'action\s*=\s*["\'][^"\']*admin\.do', html, re.I):
+        return False
+    if "publickeyexponent" in html.lower():
+        return True
+    return bool(re.search(r'[\s"\']id\s*=\s*["\']pwd["\']', html, re.I))
+
+
+def local_lan_ipv4(host):
+    """本机面向门户的源 IPv4（拼 wlanuserip 用）；拿不到返回 ""。
+
+    UDP connect 不发包，只让内核查路由选源地址；校外/无网时很快失败。"""
+    if not host:
+        return ""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(0.5)
+        sock.connect((host, 80))
+        ip = sock.getsockname()[0]
+        return ip if ip and not ip.startswith("0.") else ""
+    except (OSError, ValueError):
+        return ""
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+class _IP_ADDR_STRING(ctypes.Structure):
+    pass
+
+
+_IP_ADDR_STRING._fields_ = [
+    ("Next", ctypes.POINTER(_IP_ADDR_STRING)),
+    ("IpAddress", ctypes.c_char * 16),
+    ("IpMask", ctypes.c_char * 16),
+    ("Context", wintypes.DWORD),
+]
+
+
+class _IP_ADAPTER_INFO(ctypes.Structure):
+    pass
+
+
+# 只声明到 IpAddressList 为止：GetAdaptersInfo 写进传入缓冲区，
+# 我们靠 Next 指针遍历，不读后面的字段，所以不需要完整结构体。
+_IP_ADAPTER_INFO._fields_ = [
+    ("Next", ctypes.POINTER(_IP_ADAPTER_INFO)),
+    ("ComboIndex", wintypes.DWORD),
+    ("AdapterName", ctypes.c_char * 260),
+    ("Description", ctypes.c_char * 132),
+    ("AddressLength", ctypes.c_uint),
+    ("Address", ctypes.c_ubyte * 8),
+    ("Index", wintypes.DWORD),
+    ("Type", ctypes.c_uint),
+    ("DhcpEnabled", ctypes.c_uint),
+    ("CurrentIpAddress", ctypes.POINTER(_IP_ADDR_STRING)),
+    ("IpAddressList", _IP_ADDR_STRING),
+]
+
+_ERROR_BUFFER_OVERFLOW = 111
+
+
+def _enum_ipv4_ifaces():
+    """枚举本机 IPv4 网卡 → [(ip, "aa-bb-cc-dd-ee-ff")]。
+
+    用 GetAdaptersInfo（iphlpapi，零依赖、IPv4-only 刚好是我们要的）：
+    无需管理员权限，也不用 COM/WMI。任何异常一律返回 []，调用方回退。
+    """
+    if os.name != "nt":
+        return []
+    out = []
+    try:
+        size = wintypes.ULONG(16 * 1024)
+        buf = ctypes.create_string_buffer(size.value)
+        fn = ctypes.windll.iphlpapi.GetAdaptersInfo
+        rc = fn(ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_INFO)),
+                ctypes.byref(size))
+        if rc == _ERROR_BUFFER_OVERFLOW:
+            buf = ctypes.create_string_buffer(size.value)
+            rc = fn(ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_INFO)),
+                    ctypes.byref(size))
+        if rc != 0:
+            return []
+        node = ctypes.cast(buf, ctypes.POINTER(_IP_ADAPTER_INFO))
+        guard = 0
+        while node and guard < 64:
+            guard += 1
+            info = node.contents
+            n = int(info.AddressLength)
+            mac = ""
+            if n >= 6:
+                mac = "-".join("%02x" % info.Address[i] for i in range(6))
+            ip = info.IpAddressList.IpAddress.decode("ascii", "ignore").strip()
+            # 全 0 的 MAC/地址是未连接的虚拟网卡，跳过
+            if (mac and mac != "00-00-00-00-00-00"
+                    and ip and ip != "0.0.0.0"):
+                out.append((ip, mac))
+            node = info.Next
+    except Exception:
+        return []
+    return out
+
+
+def pick_mac_for_ip(ifaces, ip):
+    """从 [(ip, mac)] 里挑出与 ip 完全一致的那张网卡的 MAC（纯函数）。
+
+    单独拆出来是为了可单测：ctypes 枚举部分在无网卡/被拦截的环境里只能
+    返回空列表，真正的选择规则不该依赖那个环境。
+    """
+    if not ip:
+        return ""
+    for entry_ip, mac in ifaces or ():
+        if entry_ip == ip and mac:
+            return mac
+    return ""
+
+
+def local_mac_for_ip(ip):
+    """面向某块网卡（由本机 IPv4 指定）的 MAC；取不到返回 ""。"""
+    return pick_mac_for_ip(_enum_ipv4_ifaces(), ip)
+
+
+def local_mac_text():
+    """本机 MAC 的**兜底**来源（aa-bb-cc-dd-ee-ff）。
+
+    uuid.getnode() 取的是“第一块网卡”，可能根本不是走校园网的那块（实测：
+    返回 74-3a-f4-ca-f3-ec，而 Wi-Fi 网卡是 74-3a-f4-ca-f3-eb）。因此它只能
+    当候选：优先用 local_mac_for_ip（按本机 IPv4 反查同一块网卡）。
+    """
+    try:
+        node = uuid.getnode()
+    except Exception:
+        return ""
+    if (node >> 40) % 2:        # 组播位为 1 → uuid 给的随机数，不是真 MAC
+        return ""
+    return "-".join("%02x" % ((node >> (8 * i)) & 0xff) for i in range(5, -1, -1))
+
+
 # ============================ 门户客户端 ============================
 
 class PortalClient:
@@ -778,6 +930,37 @@ class PortalClient:
         return self.interface("keepalive", {"userIndex": ui})
 
     # ---------- 登录页发现 ----------
+    def login_page_query(self):
+        """按 login_page_hints 与本机地址拼出登录页 queryString。
+
+        锐捷 ePortal 只在请求带了"认证设备参数"时才下发学生登录页：
+        不带参数的 `/eportal/index.jsp` 只会回一句
+        `alert('WEB认证设备未注册…')`，根路径可能只给成功页或管理台。
+        正常流程里这些参数来自网关 302；网关不做劫持时（例如未认证阶段
+        DNS 直接被黑洞），就只能按这里登记的 wlanacname / nasip 自己拼。
+        缺关键参数时返回 ""（不拼、不乱猜）。
+        """
+        hints = self.cfg.get("login_page_hints") or {}
+        if not isinstance(hints, dict):
+            return ""
+        nasip = str(hints.get("nasip") or "").strip()
+        acname = str(hints.get("wlanacname") or "").strip()
+        if not nasip or not acname:
+            return ""
+        ip = (str(hints.get("wlanuserip") or "").strip()
+              or local_lan_ipv4(self.host))
+        if not ip:
+            return ""
+        mac = (str(hints.get("wlanparameter") or "").strip()
+               or local_mac_for_ip(ip)     # 走校园网那块网卡的 MAC（首选）
+               or local_mac_text())        # 兜底：uuid.getnode()
+        fields = [("wlanuserip", ip), ("wlanacname", acname),
+                  ("nasip", nasip)]
+        if mac:
+            fields.append(("wlanparameter", mac))
+        fields.append(("url", str(hints.get("url") or "")))
+        return urllib.parse.urlencode(fields)
+
     def discover_login_page(self, detection=None):
         """
         找到真正的登录页 URL 并返回 (url, html)。
@@ -815,7 +998,7 @@ class PortalClient:
                                         timeout=self.timeout, cookie_jar=self.cookies)
             if response.status == 200:
                 html = response.text()
-                if "publicKeyExponent" in html or "pwd" in html:
+                if looks_like_eportal_login(html):
                     return url, html
             return None, None
 
@@ -824,11 +1007,13 @@ class PortalClient:
             if page[1]:
                 return page
 
+        portal_answered = False
         for p in ("/", self.base + "/index.jsp", self.base + "/"):
             if self.url(p) in seen:
                 continue
             r = http_request("GET", self.host, self.port, p,
                              timeout=self.timeout, cookie_jar=self.cookies)
+            portal_answered = portal_answered or r.status > 0
             page = read_page(self.url(p), r)
             if page[1]:
                 return page
@@ -844,6 +1029,30 @@ class PortalClient:
                 page = read_page(loc, base_url=self.url(p))
                 if page[1]:
                     return page
+
+        # ---- 兜底：网关不做 302 劫持时，自己按门户设备参数拼登录页 URL ----
+        # 校外网络门户本来就不可达，这里不再追加请求、也不刷日志。
+        query = self.login_page_query()
+        hints = self.cfg.get("login_page_hints")
+        if query:
+            path = "%s/index.jsp?%s" % (self.base, query)
+            resp = http_request("GET", self.host, self.port, path,
+                                timeout=self.timeout, cookie_jar=self.cookies)
+            page = read_page(self.url(path), resp)
+            if page[1]:
+                return page
+            if resp.status > 0:
+                log.info("登录页兜底无效：按 login_page_hints 拼出的地址没返回"
+                         "登录页（核对 wlanacname / nasip 是否与 SAM+ 登记的"
+                         " portal 设备一致）")
+        elif portal_answered:
+            if isinstance(hints, dict) and hints:
+                log.info("登录页兜底未生效：login_page_hints 缺 nasip /"
+                         " wlanacname（或本机取不到 IPv4）")
+            else:
+                log.info("未找到可用登录页：网关没给出重定向，门户根路径也不给"
+                         "登录页。可把浏览器登录时地址栏 index.jsp? 后面的参数"
+                         "填进 config.json 的 login_page_hints")
         return None, None
 
     def check_authentication(self):
@@ -868,9 +1077,10 @@ class PortalClient:
         except (TypeError, ValueError):
             return None, None
         fields = parse_inputs(html)
-        encrypt_flag = fields.get("passwordEncrypt", "").lower()
+        encrypt_flag = str(fields.get("passwordEncrypt", "")).strip().lower()
         if encrypt_flag == "true":
-            if not (fields.get("publicKeyExponent") and fields.get("publicKeyModulus")):
+            if not (fields.get("publicKeyExponent")
+                    and fields.get("publicKeyModulus")):
                 return None, None
         elif encrypt_flag != "false" or "pwd" not in fields:
             return None, None
@@ -887,13 +1097,28 @@ class PortalClient:
         parsed = urllib.parse.urlparse(url)
         query_string = parsed.query
         qs_params = urllib.parse.parse_qs(query_string)
-        mac = (qs_params.get("mac") or [""])[0]
+        # 门户页面 login_bch.js 的口径：queryString 里没有 mac 时用 111111111 参与加密
+        # （未认证劫持拿到的 URL 往往只带 wlanparameter，没有 mac）
+        mac = (qs_params.get("mac") or [""])[0] or "111111111"
 
         fields = parse_inputs(html)
         exp = fields.get("publicKeyExponent", "")
         mod = fields.get("publicKeyModulus", "")
         encrypt_flag = fields.get("passwordEncrypt", "false")
         use_encrypt = str(encrypt_flag).lower() == "true"
+
+        # 有些门户（锐捷 ePortal 新版登录页）把 passwordEncrypt / RSA 公钥都留空，
+        # 真值由页面 JS 从 pageInfo 拉下来再填进隐藏域。只看 HTML 会误判成
+        # "不加密"而提交明文密码，这里按页面同样的方式补齐。
+        page_detail = None
+        if not use_encrypt or not (exp and mod):
+            page_detail = self.page_info(query_string)
+            if isinstance(page_detail, dict):
+                p_exp = str(page_detail.get("publicKeyExponent") or "").strip()
+                p_mod = str(page_detail.get("publicKeyModulus") or "").strip()
+                if (str(page_detail.get("passwordEncrypt", "")).lower() == "true"
+                        and p_exp and p_mod):
+                    use_encrypt, exp, mod = True, p_exp, p_mod
 
         # ---- 门户公钥 pinning（TOFU，pin_pubkey 可关）----
         # 威胁模型：门户身份只靠"私网 IP 可达"判定，任何能在该 IP 应答的设备
@@ -930,7 +1155,7 @@ class PortalClient:
         # 服务选择
         service = service_hint or self.cfg.get("service", "default")
         if service == "auto":
-            service = self._auto_service(query_string)
+            service = self._auto_service(query_string, info=page_detail)
 
         if use_encrypt:
             if not (exp and mod):
@@ -986,10 +1211,36 @@ class PortalClient:
                 if code in msg:
                     res["_hint"] = hint
                     break
+            blocked = self.auth_blocked_reason(query_string)
+            if blocked:
+                res["_blocked"] = blocked
+                res.setdefault("_hint", blocked)
         return res
 
-    def _auto_service(self, query_string=""):
-        info = self.page_info(query_string) or {}
+    def auth_blocked_reason(self, query_string=""):
+        """门户口径上“账号密码自动认证不可能成功”的原因；可自动认证返回 ""。
+
+        只会在这条路径（登录已失败）里问一次 pageInfo，正常登录不多打请求。
+        三个来源都是门户自己 pageInfo 里的开关：
+          * isToCasPage   ：已改成 CAS/统一身份认证（跳转登录页）
+          * isCheckSmsAuth：登录要短信二次验证
+          * validCodeUrl  ：登录页带验证码（JS 里 validCodeUrl 非空才显示）
+        """
+        info = self.page_info(query_string)
+        if not isinstance(info, dict):
+            return ""
+        if str(info.get("isToCasPage", "")).lower() == "true":
+            return "门户已改为 CAS/统一身份认证登录，无法用账号密码自动认证"
+        if str(info.get("isCheckSmsAuth", "")).lower() == "true":
+            return "门户要求短信二次验证，无法自动认证"
+        if str(info.get("validCodeUrl") or "").strip():
+            return "门户登录页已启用验证码，无法自动认证"
+        return ""
+
+    def _auto_service(self, query_string="", info=None):
+        info = (self.page_info(query_string) if info is None else info) or {}
+        if not isinstance(info, dict):
+            info = {}
         services = info.get("service") or {}
         for key, val in services.items():
             if isinstance(val, dict) and str(val.get("serviceDefault")) == "true":
@@ -1015,7 +1266,8 @@ def _sanitize_config(cfg):
     interval 为负数导致 select 抛错空转等）。"""
     for k in ("portal_port", "interval", "retry_interval", "max_interval",
               "offline_interval", "timeout", "probe_timeout",
-              "keepalive_interval", "verify_interval", "recheck_interval"):
+              "keepalive_interval", "verify_interval", "recheck_interval",
+              "logout_pause"):
         try:
             cfg[k] = int(cfg[k])
         except (TypeError, ValueError):
@@ -1029,6 +1281,8 @@ def _sanitize_config(cfg):
     cfg["keepalive_interval"] = max(30, cfg["keepalive_interval"])
     cfg["verify_interval"] = max(2, cfg["verify_interval"])
     cfg["recheck_interval"] = max(5, cfg["recheck_interval"])
+    # 0 = 关闭静默期；上限 24h，防止手写配置把守护“永久禁用”
+    cfg["logout_pause"] = min(max(0, cfg["logout_pause"]), 86400)
     targets = cfg.get("detect_targets")
     if not isinstance(targets, list):
         targets = None  # 非列表（如字符串 "x" 是 truthy）一律按缺失处理
@@ -1040,6 +1294,44 @@ def _sanitize_config(cfg):
             json.dumps(DEFAULT_CONFIG["detect_targets"]))
     if not isinstance(cfg.get("portal_host"), str) or not cfg["portal_host"]:
         cfg["portal_host"] = DEFAULT_CONFIG["portal_host"]
+    # 账号：去空白，非字符串一律置空（避免 None 拼进登录表单）
+    user = cfg.get("username")
+    cfg["username"] = user.strip() if isinstance(user, str) else ""
+    # 服务名：只认门户口径的四个值（大小写不敏感），写错就回落 default 而不是
+    # 原样 POST 给门户（写错时门户只会回一句“未知服务”，很难自査）。
+    svc = cfg.get("service")
+    svc = svc.strip() if isinstance(svc, str) else ""
+    if svc.lower() in ("default", "auto"):
+        cfg["service"] = svc.lower()
+    elif svc.upper() in ("DX", "LT", "YD"):
+        cfg["service"] = svc.upper()
+    else:
+        if svc:
+            log.warning("配置里的 service=%r 不是合法值，已回落 default"
+                        "（可选：default / DX / LT / YD / auto）", svc)
+        cfg["service"] = "default"
+    # 接口前缀：必须以 / 开头、不以 / 结尾（否则 url() 会拼出
+    # http://host:80eportal/... 这种发不出去的地址，而调用方看不出原因）
+    base = cfg.get("portal_base")
+    base = base.strip() if isinstance(base, str) else ""
+    if not base.startswith("/"):
+        base = "/" + base
+    cfg["portal_base"] = base.rstrip("/") or "/eportal"
+    # 登录页兜底参数：只保留字符串型的已知键，其余丢弃，避免脏配置拼出怪 URL。
+    # 非字典或空字典（含 false / null / {}）→ 关闭兜底；部分给出时按默认值补齐；
+    # wlanuserip / wlanparameter 留空表示"用本机当前地址自动填充"。
+    hints = cfg.get("login_page_hints")
+    if not isinstance(hints, dict) or not hints:
+        cfg["login_page_hints"] = {}
+    else:
+        merged = dict(DEFAULT_CONFIG["login_page_hints"])
+        merged.update({k: v for k, v in hints.items()
+                       if isinstance(v, (str, int, float))})
+        cfg["login_page_hints"] = {
+            k: str(merged.get(k) or "").strip()
+            for k in ("wlanacname", "nasip", "wlanuserip",
+                      "wlanparameter", "url")
+        }
     # 布尔项容错（用户手写 JSON 可能写成字符串 "false"）
     v = cfg.get("pin_pubkey", True)
     cfg["pin_pubkey"] = v if isinstance(v, bool) else True
@@ -1159,6 +1451,80 @@ def clear_session():
         for k in ("userIndex", "loginTime", "last_error"):
             st.pop(k, None)
         save_state(st)
+
+
+# ---- “手动下线”静默期 ----
+# 用户显式下线（界面「下线」/CLI logout）后，守护不得马上把他登回去：
+# 旧行为是 30s 一轮发现未认证就重登（实测 0.5.4/0.6.0 均 14~36s），
+# “下线”按钮形同虚设。静默期存 state.json（跨守护重启生效），
+# 执行 login（界面「立即连接」/CLI）会立即清除。
+LOGOUT_PAUSE_KEY = "logout_pause_until"
+
+
+def set_logout_pause(seconds):
+    """设置/清除手动下线静默期（秒）。seconds<=0 表示清除。"""
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        with _state_lock():
+            st = load_state()
+            if st.pop(LOGOUT_PAUSE_KEY, None) is not None:
+                save_state(st)
+        return 0
+    until = int(time.time()) + seconds
+    update_state({LOGOUT_PAUSE_KEY: until})
+    return until
+
+
+def logout_pause_left():
+    """手动下线静默期剩余秒数（已过期/未设置返回 0）。"""
+    try:
+        until = int(load_state().get(LOGOUT_PAUSE_KEY) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, until - int(time.time()))
+
+
+def clear_logout_pause():
+    """解除手动下线静默期（用户显式要求联网时调用）。返回是否真的清过。
+
+    所有"用户主动要联网"的入口都要走这里：CLI login、界面「立即连接」、
+    tkinter 回退界面的登录按钮。少了任何一处，用户下线后手动连上、随后一
+    掉线，守护就会因为静默期还在而不自动重连（最多 10 分钟）。
+    """
+    if not logout_pause_left():
+        return False
+    set_logout_pause(0)
+    log.info("已解除手动下线静默期")
+    return True
+
+
+# ---- 跨进程累计计数（守护重启不归零）----
+_STATS_WRITE_AT = 0.0
+
+
+def save_stats_totals(totals, min_gap=60.0):
+    """把“跨进程累计计数”写进 state.json；默认 60s 内最多写一次。
+
+    为什么需要：`stats` 是进程内字典，守护每重启一次就归零，心跳里的
+    “累计登录成功=0”会让人误以为从来没认证过（真实排查中误导过两次）。
+    限流是为了登录失败风暴时不把磁盘写爆。
+    """
+    global _STATS_WRITE_AT
+    now = time.time()
+    if min_gap > 0 and now - _STATS_WRITE_AT < min_gap:
+        return False
+    _STATS_WRITE_AT = now
+    clean = {}
+    for k, v in (totals or {}).items():
+        try:
+            clean[str(k)] = int(v)
+        except (TypeError, ValueError):
+            continue
+    update_state({"stats": clean})
+    return True
 
 
 # 状态事件类型 → 展示文案（供 UI 即时状态条复用）
@@ -1725,6 +2091,269 @@ def _ver_key(text):
     return tuple(parts[:4])
 
 
+# ---- GitHub Release 更新检查（只检查，不下载、不替换文件）----
+_UPDATE_CACHE = {"t": 0.0, "data": None}
+_UPDATE_LOCK = threading.Lock()
+_UPDATE_FETCH_LOCK = threading.Lock()   # 同一时刻只允许一个网络请求在跑
+UPDATE_STATE_KEY = "update_last"        # state.json 里保存最近一次检查结果
+
+
+def _release_version(tag):
+    """把 Release 标签 "V0.6.0" / "v0.6.0" 归一成 "0.6.0"。"""
+    text = str(tag or "").strip()
+    return text[1:] if text[:1] in ("v", "V") else text
+
+
+def _release_url_allowed(url):
+    """只允许打开本仓库的 Release 页面，避免把任意 URL 交给浏览器。"""
+    return (isinstance(url, str)
+            and url.startswith("https://github.com/%s/releases/" % GITHUB_REPO))
+
+
+def _release_asset_url_allowed(url):
+    """只允许下载本仓库 Release 的**资产**（releases/download/...）。
+
+    比"页面"白名单更严：自动下载只认这一种前缀，杜绝把任意 URL 当成更新包。
+    """
+    return (isinstance(url, str)
+            and url.startswith("https://github.com/%s/releases/download/"
+                               % GITHUB_REPO))
+
+
+def _default_update_info():
+    return {
+        "ok": False, "current": APP_VERSION, "latest": "", "available": False,
+        "url": GITHUB_RELEASES_URL, "name": "", "published_at": "",
+        "checked_at": 0, "error": "",
+        # 更新资产（一键下载用）：只认本仓库 releases/download 前缀
+        "asset_url": "", "asset_size": 0, "asset_sha256": "",
+    }
+
+
+def _fmt_checked_at(ts):
+    """把 checked_at 时间戳格式化为 "MM-DD HH:MM"（本地时区）。"""
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(int(ts)))
+    except (TypeError, ValueError, OSError):
+        return "未知"
+
+
+def _save_update_state(info):
+    """把最近一次检查结果落盘，供**新进程**（status / upgrade --check）读取。
+
+    只存检查结论；current / available 在读取时按当前 APP_VERSION 重算，
+    避免升级后仍显示"有新版本"。
+    """
+    rec = {k: info.get(k) for k in
+           ("ok", "latest", "available", "url", "name",
+            "published_at", "checked_at", "error",
+            "asset_url", "asset_size", "asset_sha256")}
+    try:
+        update_state({UPDATE_STATE_KEY: rec})
+    except Exception as e:  # noqa: BLE001 落盘失败不影响检查结果
+        log.debug("保存更新检查结果失败: %r", e)
+
+
+def get_update_info():
+    """读取最近一次 Release 检查结果：内存缓存 → state.json → 默认值。
+
+    绝不发网络请求。缓存为空时用落盘记录"预热"，这样 CLI 新进程也能看到
+    界面进程上次查到的结果，而不是永远显示"未检查"。
+    """
+    with _UPDATE_LOCK:
+        if _UPDATE_CACHE["data"] is None:
+            rec = load_state().get(UPDATE_STATE_KEY)
+            if isinstance(rec, dict):
+                data = _default_update_info()
+                data.update({k: rec[k] for k in data if k in rec})
+                data["current"] = APP_VERSION
+                latest = str(data.get("latest") or "").strip()
+                data["available"] = bool(latest) and (
+                    _ver_key(latest) > _ver_key(APP_VERSION))
+                _UPDATE_CACHE["data"] = data
+                _UPDATE_CACHE["t"] = float(data.get("checked_at") or 0)
+        data = _UPDATE_CACHE["data"]
+        return dict(data) if data is not None else _default_update_info()
+
+
+def update_check_due(now=None):
+    """距离上次检查是否该重查（成功 6 小时、失败 5 分钟）。返回 (due, info)。
+
+    只做判定、不发请求；由界面决定"当前在线时才真正去查"。
+    """
+    info = get_update_info()
+    checked = int(info.get("checked_at") or 0)
+    if not checked:
+        return True, info
+    interval = UPDATE_CHECK_TTL if info.get("ok") else UPDATE_CHECK_FAIL_TTL
+    return ((now if now is not None else time.time()) - checked) >= interval, info
+
+
+def check_latest_release(force=False, timeout=5.0):
+    """查询 GitHub 最新正式 Release，返回可 JSON 序列化的结果。
+
+    只使用标准库；失败不抛异常，由调用方决定是否提示。成功缓存 6 小时，
+    失败缓存 5 分钟，避免界面反复轮询时打满 GitHub 的匿名 API 限额。
+    结果同时落盘 state.json，CLI（新进程）也能读到上次检查结论。
+    """
+    now = time.time()
+    with _UPDATE_LOCK:
+        cached = _UPDATE_CACHE["data"]
+        if cached is not None and not force:
+            ttl = UPDATE_CHECK_TTL if cached.get("ok") else UPDATE_CHECK_FAIL_TTL
+            if now - _UPDATE_CACHE["t"] < ttl:
+                return dict(cached)
+    if not _UPDATE_FETCH_LOCK.acquire(blocking=False):
+        # 界面自动重查与手动点击撞车：只保留一个请求，另一个直接复用当前结果
+        return get_update_info()
+    try:
+        info = _default_update_info()
+        try:
+            req = urllib.request.Request(
+                GITHUB_API_LATEST,
+                headers={
+                    "User-Agent": "CampusNetAuth/" + APP_VERSION,
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(payload, dict):
+                raise ValueError("GitHub API 返回格式异常")
+            latest = _release_version(payload.get("tag_name"))
+            if not _ver_key(latest):
+                raise ValueError("无法解析 Release 版本号: %r"
+                                 % (payload.get("tag_name"),))
+            info.update({
+                "ok": True,
+                "latest": latest,
+                "available": _ver_key(latest) > _ver_key(APP_VERSION),
+                "name": str(payload.get("name") or ""),
+                "published_at": str(payload.get("published_at") or ""),
+            })
+            html_url = payload.get("html_url")
+            if _release_url_allowed(html_url):
+                info["url"] = html_url
+            # 更新资产：只认名字精确匹配 + 本仓库 releases/download 前缀。
+            # digest 是 GitHub 为 Release 资产提供的 sha256（没有就只校验大小）。
+            for asset in payload.get("assets") or []:
+                if not isinstance(asset, dict):
+                    continue
+                if str(asset.get("name") or "") != APP_NAME + ".exe":
+                    continue
+                dl_url = str(asset.get("browser_download_url") or "")
+                if not _release_asset_url_allowed(dl_url):
+                    continue
+                info["asset_url"] = dl_url
+                try:
+                    info["asset_size"] = int(asset.get("size") or 0)
+                except (TypeError, ValueError):
+                    info["asset_size"] = 0
+                digest = str(asset.get("digest") or "").strip().lower()
+                if digest.startswith("sha256:"):
+                    info["asset_sha256"] = digest.split(":", 1)[1].strip()
+                break
+            log.debug("Release 检查：当前 %s / 最新 %s / 可用更新=%s",
+                      APP_VERSION, latest, info["available"])
+        except Exception as e:  # noqa: BLE001 网络/解析失败都按"检查失败"处理
+            info["error"] = "%s: %s" % (e.__class__.__name__, e)
+            log.debug("检查 GitHub Release 失败: %r", e)
+        info["checked_at"] = int(time.time())
+        _save_update_state(info)
+        with _UPDATE_LOCK:
+            _UPDATE_CACHE["t"] = time.time()
+            _UPDATE_CACHE["data"] = dict(info)
+        return info
+    finally:
+        _UPDATE_FETCH_LOCK.release()
+
+
+DOWNLOAD_TMP_NAME = "_CampusNetAuth_update.tmp"   # 不以 .exe 结尾，避免被当成升级候选
+
+
+def download_release_asset(info, dest=None, timeout=30.0):
+    """从本仓库 Release 下载更新资产并校验，返回 (path, error)。
+
+    * 只接受 `https://github.com/<repo>/releases/download/` 前缀；
+    * 先写 `.part`，校验「大小 → SHA256（API 给了才算）→ 文件版本」后原子改名；
+    * 只读 PE 版本资源，**绝不执行**下载下来的文件；
+    * 任何一步失败都删掉临时文件，返回 (None, 可读原因)。
+    """
+    info = info or {}
+    if not getattr(sys, "frozen", False):
+        return None, "开发态不支持自动下载升级（请直接重新构建）"
+    url = str(info.get("asset_url") or "")
+    if not url:
+        return None, "没有可用的下载地址（请先点「检查更新」重新获取）"
+    if not _release_asset_url_allowed(url):
+        return None, "下载地址不是本仓库的 Release 资产，已拒绝"
+    try:
+        expect_size = int(info.get("asset_size") or 0)
+    except (TypeError, ValueError):
+        expect_size = 0
+    expect_sha = str(info.get("asset_sha256") or "").strip().lower()
+
+    dest = dest or os.path.join(BASE_DIR, DOWNLOAD_TMP_NAME)
+    part = dest + ".part"
+    h = hashlib.sha256()
+    got = 0
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "CampusNetAuth/" + APP_VERSION})
+        with urllib.request.urlopen(req, timeout=timeout) as resp, \
+                open(part, "wb") as f:
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+                if expect_size and got > expect_size:
+                    raise ValueError("下载内容超过声明大小（%d 字节）" % expect_size)
+            f.flush()
+            os.fsync(f.fileno())
+        if expect_size and got != expect_size:
+            raise ValueError("大小不符（收到 %d / 应为 %d 字节）" % (got, expect_size))
+        if expect_sha and h.hexdigest() != expect_sha:
+            raise ValueError("SHA256 校验失败（下载可能损坏或被篡改）")
+        ver, product = pe_version(part)
+        if not ver:
+            raise ValueError("下载的文件没有版本信息，可能不是有效的程序文件")
+        if product and product != APP_NAME:
+            raise ValueError("该文件的 ProductName 是 %r，不是 %s"
+                             % (product, APP_NAME))
+        if _ver_key(ver) <= _ver_key(APP_VERSION):
+            raise ValueError("下载的版本 %s 不高于当前 %s" % (ver, APP_VERSION))
+        os.replace(part, dest)
+        log.info("更新包已下载并校验通过：v%s（%d 字节）", ver, got)
+        return dest, ""
+    except Exception as e:  # noqa: BLE001 网络/校验/写入失败统一转成可读原因
+        for p in (part, dest):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        log.warning("下载更新失败: %r", e)
+        return None, str(e)
+
+
+def open_release_page():
+    """用系统浏览器打开缓存的 Release 页面（只接受本仓库地址）。"""
+    info = get_update_info()
+    url = info.get("url") or GITHUB_RELEASES_URL
+    if url != GITHUB_RELEASES_URL and not _release_url_allowed(url):
+        log.warning("拒绝打开非本仓库 Release 地址: %r", url)
+        return False
+    try:
+        import webbrowser
+        return bool(webbrowser.open(url))
+    except Exception as e:  # noqa: BLE001
+        log.warning("打开 Release 页面失败: %r", e)
+        return False
+
+
 def _parse_ver_ack(text):
     """解析守护回执 "OK <version>\\t<exe_path>" → (version, path)。"""
     t = (text or "").strip()
@@ -1811,12 +2440,6 @@ def ensure_daemon_fresh(force=False):
     stale, ver, reason = daemon_stale()
     if not stale:
         return False, ""
-    if not daemon_component_installed():
-        # ⚠️ 能停不能起 = 把用户的守护直接搞没，绝不能做。
-        # 值守组件（vbs 启动器）缺失时只报告、不动手，交给界面提示安装。
-        log.warning("检测到守护版本陈旧（%s），但值守组件缺失无法自动重启，"
-                    "请在界面「组件管理」安装值守组件", reason)
-        return False, reason
     now = time.time()
     if not force and now - _STALE_REFRESH["last"] < STALE_REFRESH_COOLDOWN:
         return False, "冷却中（%s）" % reason
@@ -1825,7 +2448,7 @@ def ensure_daemon_fresh(force=False):
     if not stop_daemon():
         log.warning("停止旧守护未完全成功，仍继续尝试启动")
     if not start_daemon():
-        log.error("守护重启失败（值守组件未安装或启动异常）")
+        log.error("守护重启失败（启动异常）")
         return False, reason
     record_event("daemon_refresh",
                  "后台守护已自动重启（%s → %s）" % (ver or "旧版", APP_VERSION))
@@ -1928,8 +2551,7 @@ def cleanup_upgrade_backup():
 
 
 # 绝不能被当成"升级候选"的同前缀文件名（卸载器 / 历史 daemon exe 副本）。
-# ⚠️ 定义在函数内部：这两个常量在"组件系统"段才声明，位于本函数之后，
-# 模块级求值会 NameError。
+# ⚠️ 定义在函数内部：这两个常量在本函数之后才声明，模块级求值会 NameError。
 
 
 def find_upgrade_candidate():
@@ -2382,13 +3004,26 @@ def _kill_if_own(pid, what="进程"):
 
     返回是否已确认该进程不再存在。这条守卫防的是 PID 复用误杀：pid 文件里的
     陈旧 PID 可能已属于别人的进程，盲杀等于随机杀人。
+
+    ⚠️ 三种结果必须分开说：
+      * 确认不是本程序（False）—— 真的可能是 PID 被复用，要用户能看懂；
+      * 无法判定（None，权限不足/进程已退出）—— 不能诬赖成“PID 被复用”，
+        否则日志会误导排查方向（实测踩过：升级后 stop 报这句，其实是
+        取不到映像路径）。
     """
     if not _proc_alive(pid):
         return True
-    if _own_exe_path() is not None and _proc_is_own(pid) is not True:
-        log.warning("拒绝终止%s PID=%s：映像不属于本程序（PID 被复用？）",
-                    what, pid)
-        return False
+    own = _own_exe_path()
+    if own is not None:
+        mine = _proc_is_own(pid)
+        if mine is False:
+            log.warning("拒绝终止%s PID=%s：映像不属于本程序（PID 被复用？）",
+                        what, pid)
+            return False
+        if mine is None:
+            # 取不到映像路径（权限/已退出）——安全起見不杀，但不要误导
+            log.debug("跳过终止%s PID=%s：无法确认进程归属", what, pid)
+            return False
     return _kill_pid(pid)
 
 
@@ -2656,6 +3291,27 @@ def run_daemon(cfg, cred):
     stats = {"loops": 0, "login_ok": 0, "login_fail": 0,
              "reconnects": 0, "state_flips": 0, "keepalive_ok": 0,
              "stale_recover": 0}
+    # 累计计数落盘：stats 是本进程计数，守护每重启一次就归零，心跳里的
+    # “累计登录成功=0”会让人误以为从未认证过（实测误导过排查）。
+    # totals 是跨进程累计，只记“结果类”事件。
+    _TOTAL_KEYS = ("login_ok", "login_fail", "reconnects", "stale_recover")
+    try:
+        _saved = load_state().get("stats")
+        totals = {k: int((_saved or {}).get(k) or 0) for k in _TOTAL_KEYS}
+    except (TypeError, ValueError):
+        totals = {k: 0 for k in _TOTAL_KEYS}
+    def _bump(key, n=1):
+        """同时记本进程与跨进程累计（写盘限流 60s，避免登录风暴刷盘）。"""
+        stats[key] = stats.get(key, 0) + n
+        totals[key] = totals.get(key, 0) + n
+        try:
+            save_stats_totals(totals)
+        except Exception:
+            pass
+
+    pause_iv = int(cfg.get("logout_pause", 600))
+    pause_logged = 0          # 已提示过的静默期截止时间（避免每轮刷屏）
+    blocked_reason = ""       # 门户侧要求验证码/短信/CAS 时的结论（空=无）
     last_info = None  # 上次登录成功的 (IP, 服务)，用于检测网络身份变化
     last_heartbeat = 0.0
     HB_INTERVAL = 300  # 心跳日志节流：每 5 分钟一条
@@ -2688,8 +3344,10 @@ def run_daemon(cfg, cred):
         now = time.time()
         if now - last_heartbeat >= HB_INTERVAL:
             last_heartbeat = now
-            log.info("存活心跳 | 已运行 %s | 在线 | 累计登录成功=%d 失败=%d",
+            log.info("存活心跳 | 已运行 %s | 在线 | 累计登录成功=%d 失败=%d"
+                     "（本次运行 +%d/+%d）",
                      _fmt_uptime(now - started_at),
+                     totals["login_ok"], totals["login_fail"],
                      stats["login_ok"], stats["login_fail"])
 
     import select as _select
@@ -2824,7 +3482,11 @@ def run_daemon(cfg, cred):
                 if online is True and prev_online is False:
                     record_event("restored", "网络已恢复在线")
                 elif online is False and prev_online is True:
-                    record_event("lost", "检测到未认证，正在自动重连…")
+                    # 手动下线的静默期内不要记成"正在自动重连"——那是假消息
+                    if logout_pause_left():
+                        record_event("offline", "手动下线中，静默期内不会自动重连")
+                    else:
+                        record_event("lost", "检测到未认证，正在自动重连…")
                 elif online is None and prev_online is not None:
                     record_event("offline", "公网探测无结论，等待复核门户状态…")
                 prev_online = online
@@ -2905,12 +3567,27 @@ def run_daemon(cfg, cred):
                         break
                 continue
 
+            # ---- 用户主动下线后的静默期：不自动登回 ----
+            left = logout_pause_left() if pause_iv > 0 else 0
+            if left:
+                # 按“截止时刻”去重：剩多少秒每轮都在变，拿它比会每轮刷一条日志
+                deadline = int(time.time()) + left
+                if pause_logged != deadline:
+                    pause_logged = deadline
+                    log.info("处于「手动下线」静默期（剩 %ds），不自动登录；"
+                             "点界面「立即连接」或执行 login 可提前恢复",
+                             left)
+                if _wait(min(left, interval)) == "STOP":
+                    return 0
+                continue
+            pause_logged = 0
+
             log.info("检测到未认证，开始登录…")
             res = client.login(username, cred, login_page=login_page)
             if res.get("result") == "success":
-                stats["login_ok"] += 1
+                _bump("login_ok")
                 if fail_streak:
-                    stats["reconnects"] += 1
+                    _bump("reconnects")
                     log.info("断线自动重连成功 ✓（累计自动重连 %d 次）",
                              stats["reconnects"])
                 fail_streak = 0
@@ -2974,11 +3651,30 @@ def run_daemon(cfg, cred):
                 # 复核通过：清空残留会话自愈计数（下次异常可再提醒一次）
                 stale_streak = 0
                 stale_notified = False
+                blocked_reason = ""
                 if _wait(interval) == "STOP":
                     return 0
             else:
-                stats["login_fail"] += 1
+                _bump("login_fail")
                 fail_streak += 1
+                # 门户要求验证码/短信/CAS：账号密码自动认证不可能成功，别让它
+                # 按 30s→600s 无休止地敲下去，也不要每轮都说一次。
+                blocked = str(res.get("_blocked") or "")
+                if blocked:
+                    if blocked != blocked_reason:
+                        blocked_reason = blocked
+                        log.error("无法自动认证：%s", blocked)
+                        record_event("blocked", "无法自动认证：%s" % blocked)
+                        update_state({"last_error": {
+                            "t": int(time.time()), "msg": blocked}})
+                        notify_system("校园网需要人工认证", blocked)
+                    wait = max(max_interval, 1800)
+                    log.error("按门户改造处理：%ds 后再试一次（其间不会反复提交"
+                              "凭据）", wait)
+                    if _wait(wait) == "STOP":
+                        return 0
+                    continue
+                blocked_reason = ""
                 msg = res.get("message")
                 msg = str(msg) if msg else ""
                 hint = res.get("_hint", "")
@@ -3026,11 +3722,9 @@ def pythonw_path():
     return sys.executable
 
 
-# ============================ 模块化组件系统 ============================
-# 单文件便携模式：exe 自带守护全部能力，组件文件（vbs 启动器）
-# 由用户从 UI 按需「安装」放出、按需「卸载」移除。
-# 注：2026-08-31 起不再有 CampusNetAuthDaemon.exe 命名副本（守护 = 同一
-# exe + daemon 参数），DAEMON_EXE_NAME 仅用于识别/清理历史遗留文件。
+# ====================== 单文件资源与历史遗留组件 ======================
+# 0.6.0 起自启 / 守护 / 界面全部由同一个 exe 承担，不再释放 VBS 组件。
+# VBS / Daemon.exe 名称仅用于识别并清理旧版本遗留文件。
 
 DAEMON_EXE_NAME = "CampusNetAuthDaemon.exe"
 DAEMON_VBS_NAME = "CampusNetAuthDaemon.vbs"
@@ -3077,45 +3771,6 @@ def _asset_path(name):
     if os.path.exists(p):
         return p
     return os.path.join(here, "build_assets", name)
-
-
-def release_asset(name, force=False):
-    """把内置资源释放到 BASE_DIR（已存在且未要求强制时视为已安装）。
-    返回是否可用（已存在或释放成功）。"""
-    src = _asset_path(name)
-    if not os.path.exists(src):
-        log.error("内置资源缺失: %s（打包时未打入？）", name)
-        return False
-    dst = os.path.join(BASE_DIR, name)
-    if os.path.exists(dst) and not force:
-        return True
-    try:
-        shutil.copy2(src, dst)
-        log.info("已释放组件文件: %s", dst)
-        return True
-    except Exception as e:
-        log.error("释放 %s 失败: %r", name, e)
-        return False
-
-
-def _remove_file(name):
-    """移除组件文件。Windows 上进程刚退出时文件可能还被引导进程短暂持有
-    共享锁（onefile 模式尤其明显），故带短重试：最多 ~6 秒。"""
-    p = os.path.join(BASE_DIR, name)
-    deadline = time.time() + 6
-    last_err = None
-    while time.time() < deadline:
-        if not os.path.exists(p):
-            return True
-        try:
-            os.remove(p)
-            log.info("已移除组件文件: %s", p)
-            return True
-        except Exception as e:
-            last_err = e
-            time.sleep(0.3)
-    log.error("移除 %s 失败: %r", name, last_err)
-    return False
 
 
 def uninstaller_path():
@@ -3212,105 +3867,35 @@ def mark_first_run():
             save_state(st)
 
 
-def _ensure_daemon_vbs():
-    """值守组件安装：释放守护启动器 CampusNetAuthDaemon.vbs（约 1.2KB 容错版）。
+def enable_autostart_service():
+    """一键开启自启服务：写 Run 键 + 确保守护在跑（不再安装 VBS 组件）。
 
-    守护核心能力内置在 exe 中，用「同一 exe + daemon 参数」启动，
-    vbs 只是无窗口启动器（与开机自启共用同一文件）。
-    不再复制 18.8MB 的 CampusNetAuthDaemon.exe 命名副本（2026-08-31 优化）。"""
-    return release_asset(DAEMON_VBS_NAME)
-
-
-def daemon_component_installed():
-    """值守组件已装 = 守护启动器 vbs 就位（可手动启动守护）。"""
-    return os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME))
-
-
-def ui_component_installed():
-    return os.path.exists(os.path.join(BASE_DIR, UI_VBS_NAME))
-
-
-def autostart_component_status():
-    """开机自启组件状态：以 Run 键 + 启动器 vbs 完整性共同判断。
-    missing=未安装 / installed=启动器就位但未启用 / enabled=已安装并启用
-
-    ⚠️ 2026-09-01 修复：仅看 Run 键不看启动器文件 → Run 键残留但 vbs 缺失时
-    误报 enabled，导致"已启用"误导用户，且开机自启必失败（80070002）。
-    修复：vbs 缺失统一视为 missing（无论 Run 键是否残留）。"""
-    vbs_ok = os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME))
-    if not vbs_ok:
-        # 启动器缺失 → 视为未安装（无论 Run 键是否残留，避免假象）
-        return "missing"
-    if autostart_status():
-        return "enabled"
-    return "installed"
+    返回 (ok, message)。自启写入成功但守护启动失败时仍返回 True，
+    因为开机自启已生效；由界面提示用户手动点「启动守护」。
+    """
+    if not install_autostart():
+        return False, "写入开机自启注册表失败，详见日志"
+    try:
+        if not daemon_running():
+            start_daemon()
+    except Exception as e:
+        log.warning("自启已启用，但启动守护失败: %r", e)
+        return True, "开机自启已启用，但守护启动失败，请点「启动守护」重试"
+    return True, "开机自启已启用，后台守护已启动"
 
 
-def components_status():
-    return {
-        "autostart": autostart_component_status(),
-        "daemon": "installed" if daemon_component_installed() else "missing",
-        "ui": "installed" if ui_component_installed() else "missing",
-    }
-
-
-def install_component(name):
-    """安装组件，返回 (ok, message)。
-    autostart=Daemon.vbs+注册表 Run 键；daemon=守护启动器 vbs（不再复制 exe 副本）；
-    ui=UI.vbs 静默启动器。"""
-    if name == "autostart":
-        if not release_asset(DAEMON_VBS_NAME):
-            return False, "释放 Daemon.vbs 失败（资源缺失，请重新打包）"
-        if not install_autostart():
-            return False, "写入开机自启注册表失败，详见日志"
-        return True, "开机自启组件已安装并启用"
-    if name == "daemon":
-        if not _ensure_daemon_vbs():
-            return False, "释放守护启动器失败（资源缺失，请重新打包）"
-        # 安装即生效：启动器就位后立即拉起守护（已运行则幂等跳过），
-        # 避免"装了忘启动"的空窗期
-        try:
-            if not daemon_running():
-                start_daemon()
-        except Exception as e:
-            log.warning("值守组件安装后自动启动守护失败: %r", e)
-        return True, "值守组件已安装（守护启动器 vbs 已就位，不再复制 exe 副本）"
-    if name == "ui":
-        if not release_asset(UI_VBS_NAME):
-            return False, "释放 UI.vbs 失败（资源缺失，请重新打包）"
-        return True, "界面启动器组件已安装"
-    return False, "未知组件: %s" % name
-
-
-def uninstall_component(name):
-    """卸载组件：移除放出的文件（自启顺带删除注册表 Run 键）。
-    返回 (ok, message)。"""
-    if name == "autostart":
-        uninstall_autostart()
-        # vbs 归值守组件管理：自启卸载只删 Run 键，保留 vbs 供守护使用
-        return True, "开机自启组件已卸载（Run 键已删除，守护启动器保留）"
-    if name == "daemon":
-        if daemon_running():
-            return False, "守护正在运行，请先「停止守护」再卸载"
-        if autostart_status():
-            return False, "开机自启仍在启用中（Run 键依赖此启动器），请先卸载「开机自启组件」"
-        ok = _remove_file(DAEMON_VBS_NAME)
-        return ok, ("值守组件已卸载" if ok
-                    else "移除 Daemon.vbs 失败，详见日志")
-    if name == "ui":
-        ok = _remove_file(UI_VBS_NAME)
-        return ok, ("界面启动器组件已卸载" if ok
-                    else "移除 UI.vbs 失败，详见日志")
-    return False, "未知组件: %s" % name
+def disable_autostart_service():
+    """关闭自启服务：只删 Run 键，当前运行中的守护不受影响。"""
+    ok = uninstall_autostart()
+    return ok, ("开机自启已关闭（当前守护未受影响）" if ok
+                else "移除开机自启失败，详见日志")
 
 
 def daemon_exe():
-    """返回守护进程可执行文件路径（严格组件模式）。
+    """返回守护进程可执行文件路径。
 
-    * 打包态：直接返回自身 exe（守护 = 同一 CampusNetAuth.exe + daemon 参数，
-      不再需要 CampusNetAuthDaemon.exe 命名副本；组件守卫由调用方按
-      daemon_component_installed() 判定）。
-    * 开发态：保持 pythonw 命名副本逻辑（开发环境无组件概念）。
+    * 打包态：直接返回自身 exe（守护 = 同一 CampusNetAuth.exe + daemon 参数）。
+    * 开发态：保持 pythonw 命名副本逻辑。
     """
     if getattr(sys, "frozen", False):
         return os.path.abspath(sys.executable)
@@ -3335,14 +3920,9 @@ FIRST_DEPLOY = first_deploy()
 
 
 def start_daemon():
-    """以无窗口方式启动守护，返回是否成功。
-    打包态未安装「值守组件」（守护启动器 vbs 缺失）时返回 False。"""
+    """以无窗口方式启动守护，返回是否成功。"""
     if daemon_running():
         return True
-    if not daemon_component_installed():
-        log.error("值守组件未安装（缺少 %s），请先在 UI 安装",
-                  DAEMON_VBS_NAME)
-        return False
     try:
         exe = daemon_exe()
         if getattr(sys, "frozen", False):
@@ -3373,19 +3953,10 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 def _autostart_cmd():
     """注册表 Run 键里存放的启动命令。
 
-    * 打包态：优先 wscript 静默运行同目录的 CampusNetAuthDaemon.vbs
-      （窗口样式 0 = 完全无窗口，登录时不闪任何黑窗）。`//B`（batch 模式）
-      必不可少：目录被"绿色删除/搬走"后 Run 键会指向不存在的 vbs，不带 //B
-      的 wscript 会弹出模态"找不到脚本文件"报错框并卡住登录（实测如此），
-      带 //B 则静默退出（exit 1，零 UI）——vbs 内部本就是 On Error Resume Next
-      的容错启动器，静默失败符合设计。
-      vbs 缺失（被手动删除）时退化为直接运行 exe（仍会被 hide_console 隐藏）。
-    * 开发态：pythonw 命名副本 + 脚本参数（保持原有逻辑）。
+    打包态直接运行自身 exe 的 daemon 子命令（--windowed 构建本身无控制台，
+    不再需要 VBS 中转）。开发态仍是 pythonw + 脚本参数。
     """
     if getattr(sys, "frozen", False):
-        vbs = os.path.join(BASE_DIR, DAEMON_VBS_NAME)
-        if os.path.exists(vbs):
-            return 'wscript.exe //B "%s"' % vbs
         return '"%s" daemon' % os.path.abspath(sys.executable)
     script = os.path.abspath(__file__)
     return '"%s" "%s" daemon' % (daemon_exe(), script)
@@ -3404,14 +3975,10 @@ def _clean_legacy_task():
 def install_autostart():
     """写入 HKCU 运行键：当前用户级自启，无需管理员权限。
     schtasks 在受限环境会报“拒绝访问”，注册表方案更可靠。"""
-    # 前置校验：打包态自启必须经 vbs 静默启动器，vbs 缺失时直接拒绝，
-    # 避免装出一个"开机必弹 80070002"的残缺自启（用户侧已出现此报错）。
+    # 前置校验：Run 键直接指向自身 exe，exe 必须真实存在。
     if getattr(sys, "frozen", False):
-        if not os.path.exists(os.path.join(BASE_DIR, DAEMON_VBS_NAME)):
-            log.error("安装开机自启失败: 启动器 %s 缺失", DAEMON_VBS_NAME)
-            return False
-        if not os.path.exists(os.path.join(BASE_DIR, "CampusNetAuth.exe")):
-            log.error("安装开机自启失败: CampusNetAuth.exe 不在程序目录")
+        if not os.path.exists(os.path.abspath(sys.executable)):
+            log.error("安装开机自启失败: 当前 exe 路径不存在")
             return False
     try:
         import winreg
@@ -3469,13 +4036,13 @@ def autostart_status():
 
 
 def autostart_health():
-    """自启链路健康检查：Run 键 → 启动器（vbs/exe）→ exe 全链路文件完整性。
+    """自启链路健康检查：Run 键 → exe（兼容旧版 VBS 启动器）文件完整性。
 
     返回 (ok, reason)：
     * 未启用自启 / Run 键读不到 → (True, "")（未安装不属异常，不打扰用户）
-    * Run 键指向的 vbs 或 exe 缺失 → (False, 原因)。这正是"开机弹
+    * Run 键指向的 exe / vbs 缺失 → (False, 原因)。这正是"开机弹
       80070002 / 系统找不到指定的文件"报错的根因场景，前端据此显示红色警示条，
-      引导用户补齐文件或重装自启组件，而不是等下次开机再弹窗。
+      引导用户重新启用自启，而不是等下次开机再弹窗。
     """
     try:
         import winreg
@@ -3498,13 +4065,14 @@ def autostart_health():
     if not re.search(r"(?i)\.(vbs|exe)$", ref):
         return True, ""
     if ref.lower().endswith(".vbs"):
+        # 旧版通过 VBS 启动器自启：文件齐全即视为健康（启动时会被自动迁移）
         exe_path = os.path.join(os.path.dirname(ref), "CampusNetAuth.exe")
         if not os.path.exists(ref):
             return False, "开机自启指向的启动器已丢失：" + ref
         if not os.path.exists(exe_path):
             return False, ("开机自启将失败：启动器目录缺少 CampusNetAuth.exe，"
                            "请把 exe 与 " + DAEMON_VBS_NAME + " 放在同一文件夹，"
-                           "或卸载后重新安装「开机自启组件」")
+                           "或在界面重新启用开机自启")
         return True, ""
     if not os.path.exists(ref):
         return False, "开机自启指向的程序已丢失：" + ref
@@ -3512,21 +4080,18 @@ def autostart_health():
 
 
 def repair_autostart_cmd():
-    """自愈 Run 键命令：程序目录被搬走/改名后把自启重新指到当前位置。
+    """自愈 Run 键命令：迁移旧版 VBS 启动器 / 修正被搬走的程序路径。
 
-    只在两种情况下重写，其余一律不动作：
+    重写条件（其余一律不动作）：
     * Run 键指向的文件已不存在（目录被移动或删除）；
-    * Run 键指向的就是当前目录，但命令是旧格式（缺 //B）→ 原地升级。
+    * Run 键指向当前目录（旧版 wscript+VBS 或旧格式命令）→ 统一升级为
+      `"<当前 exe>" daemon`。
     指向"另一份仍然存在的安装"时不动手：测试副本 / 多副本实例不得劫持
     用户真实安装的自启。仅打包态生效（开发态的 pythonw 路径不在此列）。
     """
     if not getattr(sys, "frozen", False):
         return False
     want = _autostart_cmd()
-    if DAEMON_VBS_NAME not in want:
-        # 当前目录没有启动器（残缺安装）：交给 autostart_health 的红色
-        # 警示条引导用户，不在这里擅自改写
-        return False
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
@@ -3613,6 +4178,10 @@ def cmd_setup(args):
 
 def cmd_login(args):
     cfg = load_config()
+    # 显式登录（CLI login）= 用户现在就要联网 → 立刻解除“手动下线”静默期，
+    # 否则守护会继续按静默期拦住后续自动重连（界面「立即连接」走
+    # clear_logout_pause()，路径不同但语义一致）。
+    clear_logout_pause()
     cred = CredentialStore().load()
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码，请先运行: campusnet.py setup")
@@ -3669,6 +4238,13 @@ def cmd_login(args):
 def cmd_once(args):
     """单次检测：离线才登录（适合任务计划定时调用）"""
     cfg = load_config()
+    # 任务计划场景必须"尊重"用户的手动下线：把刚下线的连接又登回去，
+    # 会让「下线」在两个入口之间自相矛盾。显式要联网请用 login。
+    left = logout_pause_left()
+    if left:
+        log.info("处于「手动下线」静默期（剩 %ds），本次跳过；执行 login 可提前恢复",
+                 left)
+        return 0
     cred = CredentialStore().load()
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码")
@@ -3709,10 +4285,34 @@ def cmd_status(args):
         _ok, _dv, _dp, _dd = daemon_info()
         if _ok:
             _mark = "" if _dv == APP_VERSION else "  ← 旧版本，建议执行 upgrade"
-            safe_print("守护版本 : v%s%s" % (_dv, _mark))
+            print("守护版本 : v%s%s" % (_dv, _mark))
         else:
             print("守护版本 : 未知（%s）" % _dd)
     print("凭据文件 : %s" % ("已存在" if os.path.exists(CRED_PATH) else "缺失"))
+    _upd = get_update_info()
+    _when = ("，检查于 " + _fmt_checked_at(_upd.get("checked_at"))
+             if _upd.get("checked_at") else "")
+    if not _upd.get("checked_at"):
+        print("远程更新 : 未检查（执行 update 检查）")
+    elif not _upd.get("ok"):
+        print("远程更新 : 检查失败（%s%s）"
+              % (_upd.get("error") or "未知", _when))
+    elif _upd.get("available"):
+        print("远程更新 : 发现 v%s（%s%s）"
+              % (_upd.get("latest"), _upd.get("url"), _when))
+    else:
+        print("远程更新 : 已是最新（v%s%s）" % (_upd.get("latest"), _when))
+    # 登录页兜底：网关不做 302 劫持时靠它自己拼登录页，填错了很难自查
+    hints = cfg.get("login_page_hints") or {}
+    if isinstance(hints, dict) and hints.get("nasip") and hints.get("wlanacname"):
+        print("登录页兜底: 已配置 (wlanacname=%s nasip=%s)"
+              % (hints["wlanacname"], hints["nasip"]))
+    else:
+        print("登录页兜底: 未配置")
+    left = logout_pause_left()
+    if left:
+        print("下线静默 : 剩余 %ds（守护不会自动登回；「立即连接」或 login 可恢复）"
+              % left)
     if loc:
         print("登录页   : %s" % loc[:160])
     if online:
@@ -3750,11 +4350,42 @@ def cmd_upgrade(args):
         up, up_ver = find_upgrade_candidate()
         print("升级候选 : %s" % ("%s（v%s）" % (os.path.basename(up), up_ver)
                                 if up else "未发现（把新 exe 放进程序目录即可）"))
+        # 远端最新版本（读上次检查结论，不发网络请求；新进程靠 state.json 预热）
+        _upd = get_update_info()
+        if _upd.get("ok") and _upd.get("checked_at"):
+            print("远端最新 : v%s（%s；检查于 %s）" % (
+                _upd.get("latest"),
+                "有更新，执行 update 查看下载页" if _upd.get("available")
+                else "已是最新",
+                _fmt_checked_at(_upd.get("checked_at"))))
+        else:
+            print("远端最新 : 未检查（执行 update 检查 GitHub Release）")
         return 0
 
     ok, msg = apply_upgrade()
-    safe_print(("✓ " if ok else "✗ ") + msg)
+    # 用中文而非 ✓/✗：Windows 控制台代码页是 GBK 时，✓(U+2713) 无法编码，
+    # 会在升级**已成功**之后抛 UnicodeEncodeError 打断输出（0.5.3 实测）
+    print(("升级成功：" if ok else "升级失败：") + msg)
     return 0 if ok else 1
+
+
+def cmd_update(args):
+    """检查 GitHub 最新正式 Release（只检查，不下载、不替换文件）。"""
+    info = check_latest_release(force=getattr(args, "force", False))
+    print("当前版本 : %s" % APP_VERSION)
+    if not info.get("ok"):
+        print("检查失败 : %s" % (info.get("error") or "未知错误"))
+        return 1
+    print("最新版本 : %s" % (info.get("latest") or "(未知)"))
+    if info.get("available"):
+        print("可用更新 : 是%s" % (
+            "（%s）" % info["name"] if info.get("name") else ""))
+        print("下载页面 : %s" % info.get("url"))
+        if getattr(args, "open", False):
+            open_release_page()
+    else:
+        print("可用更新 : 否（已是最新）")
+    return 0
 
 
 def cmd_log(args):
@@ -3796,12 +4427,28 @@ def cmd_logout(args):
 
     steps = []  # 记录各方式失败原因，便于排查
 
+    def _after_logout():
+        """下线成功后的统一收尾：清会话 + 进入“手动下线”静默期。
+
+        不设静默期的话，守护 30s 内就会把你登回去（实测 14~36s），
+        “下线”按钮等于没用。静默期长度取 config.json 的 logout_pause
+        （默认 600s，0=关闭）；点「立即连接」或执行 login 会立刻解除。
+        """
+        clear_session()
+        pause = int(cfg.get("logout_pause", 600) or 0)
+        if pause > 0:
+            set_logout_pause(pause)
+            log.info("已进入手动下线静默期 %d 分钟：守护不会自动登回"
+                     "（「立即连接」或 login 可提前恢复）", max(1, pause // 60))
+        else:
+            log.info("提示：logout_pause=0，守护可能很快自动重新登录")
+
     # 1) 持久化的 userIndex（守护每次登录都会写入 state.json）
     ui = load_state().get("userIndex")
     r = by_index(ui)
     if r is True:
-        clear_session()
         log.info("已下线（userIndex 方式）")
+        _after_logout()
         return 0
     if r is not True:
         steps.append("userIndex 方式: " + safe_message(r))
@@ -3811,8 +4458,8 @@ def cmd_logout(args):
     if isinstance(info, dict) and info.get("userIndex"):
         r = by_index(info["userIndex"])
         if r is True:
-            clear_session()
             log.info("已下线（会话方式）")
+            _after_logout()
             return 0
         if r is not True:
             steps.append("会话方式: " + safe_message(r))
@@ -3827,8 +4474,8 @@ def cmd_logout(args):
     if username and cred:
         res = client.logout(force_by_cred=True, username=username, password=cred)
         if isinstance(res, dict) and str(res.get("result")).lower() == "success":
-            clear_session()
             log.info("已下线（凭据方式）")
+            _after_logout()
             return 0
         steps.append("凭据方式: " + safe_message(res))
 
@@ -3847,7 +4494,8 @@ def cmd_proxy(args):
     """
     if getattr(args, "restore", False):
         ok, msg = restore_system_proxy()
-        safe_print(("✓ " if ok else "✗ ") + msg)
+        # 用中文而非 ✓/✗：GBK 控制台下 ✓(U+2713) 无法编码会抛异常
+        print(("恢复成功：" if ok else "恢复失败：") + msg)
         return 0 if ok else 1
     if getattr(args, "off", False):
         r = disable_system_proxy(reason="命令行指定")
@@ -3855,9 +4503,9 @@ def cmd_proxy(args):
         if not before.get("active"):
             print("当前未启用系统代理，无需处理")
             return 0
-        safe_print("关闭前：" + str(before.get("detail", "")))
-        safe_print("✓ 已关闭系统代理" if r.get("ok")
-                   else "✗ 关闭系统代理时出错，详见日志")
+        print("关闭前：" + str(before.get("detail", "")))
+        print("已关闭系统代理" if r.get("ok")
+              else "关闭系统代理失败，详见日志")
         return 0 if r.get("ok") else 1
 
     st = proxy_state()
@@ -3907,11 +4555,15 @@ def cmd_diagnose(args):
 
 
 def cmd_install(args):
-    return 0 if install_autostart() else 1
+    ok, msg = enable_autostart_service()
+    print(("已启用：" if ok else "启用失败：") + msg)
+    return 0 if ok else 1
 
 
 def cmd_uninstall(args):
-    return 0 if uninstall_autostart() else 1
+    ok, msg = disable_autostart_service()
+    print(("已关闭：" if ok else "关闭失败：") + msg)
+    return 0 if ok else 1
 
 
 def cmd_uninstaller(args):
@@ -4088,7 +4740,7 @@ def cmd_test(args):
             print("登录页获取  : OK")
             print("  URL       : %s" % url[:120])
             print(" 公钥指数   : %s" % fields.get("publicKeyExponent", "(无)"))
-            safe_print(" 公钥模数   : %s…" % str(fields.get("publicKeyModulus", ""))[:40])
+            print(" 公钥模数   : %s…" % str(fields.get("publicKeyModulus", ""))[:40])
             print(" 是否加密   : %s" % fields.get("passwordEncrypt", "(无)"))
         else:
             ok = False
@@ -4172,8 +4824,16 @@ def main():
     p_up = sub.add_parser("upgrade",
                           help="就地升级到程序目录里的新版本并重启守护")
     p_up.add_argument("--check", action="store_true",
-                      help="只体检（守护版本 + 升级候选），不改动任何文件")
+                      help="只体检（守护版本 + 升级候选 + 上次远端检查结论），"
+                           "不改动任何文件")
     p_up.set_defaults(func=cmd_upgrade)
+    p_update = sub.add_parser("update",
+                              help="检查 GitHub 最新 Release（只检查，不下载）")
+    p_update.add_argument("--force", action="store_true",
+                          help="跳过缓存，立即重新检查")
+    p_update.add_argument("--open", action="store_true",
+                          help="发现更新时用浏览器打开下载页面")
+    p_update.set_defaults(func=cmd_update)
     sub.add_parser("ui", help="打开图形管理界面").set_defaults(func=cmd_ui)
     p_login = sub.add_parser("login", help="立即登录")
     p_login.add_argument("--force", action="store_true", help="已在线也强制重登")
@@ -4197,6 +4857,13 @@ def main():
 
     cfg = load_config()
     setup_logger(to_console=not is_daemon, level=cfg.get("log_level", "INFO"))
+
+    # 清理上次就地升级留下的 .old.exe（18+ MB）。旧版只有 docstring 写了
+    # “下次启动自动删”，实际从未调用 → 备份文件永久堆在程序目录（实测
+    # 装完 4 天后仍在，且它本身就是一份可执行副本，杀软误报时会被当成
+    # “另一份程序”）。放在日志初始化之后才能把结果写进日志。
+    if getattr(sys, "frozen", False):
+        cleanup_upgrade_backup()
 
     if is_daemon:
         hide_console()  # 手动从 cmd 前台运行 daemon 时共享控制台，不会误隐藏

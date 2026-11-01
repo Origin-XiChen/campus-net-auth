@@ -137,7 +137,8 @@ def _status_payload() -> dict:
                            cfg.get("portal_port", 80)),
         "interval": cfg.get("interval", ""),
         "cfg": cfg,
-        "components": cn.components_status(),
+        # GitHub Release 检查结果（只读缓存，绝不在此发网络请求）
+        "update": cn.get_update_info(),
         # 独立卸载器是否已释放到程序目录（界面据此启用「彻底卸载」入口）
         "uninstaller": cn.uninstaller_available(),
         "first_deploy": cn.FIRST_DEPLOY,
@@ -236,6 +237,40 @@ def _start_daemon_check_once() -> None:
     threading.Thread(target=_bg, daemon=True).start()
 
 
+def _start_update_check_once() -> None:
+    """界面启动后后台查一次最新 Release（失败静默，只更新状态缓存）。"""
+
+    def _bg():
+        time.sleep(5)
+        try:
+            cn.check_latest_release()
+        except Exception as e:  # noqa: BLE001
+            cn.log.debug("启动时检查 Release 失败: %r", e)
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def _start_update_retry_loop() -> None:
+    """自动补查：上次失败超 5 分钟、成功超 6 小时，且当前**在线**时重查。
+
+    启动时那次检查常在未认证阶段（GitHub 不可达）必然失败；没有这个循环，
+    用户认证成功后卡片会一直停在「检查失败」，只能手动点。离线时不发请求，
+    避免反复打 GitHub 匿名 API；网络恢复后 60s 内自动补上。
+    """
+
+    def _bg():
+        while True:
+            time.sleep(60)
+            try:
+                due, _info = cn.update_check_due()
+                if due and _PROBE_CACHE["online"] is True:
+                    cn.check_latest_release(force=True)
+            except Exception as e:  # noqa: BLE001 自动重查失败不影响界面
+                cn.log.debug("自动检查 Release 失败: %r", e)
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
 def _task_daemon_refresh() -> str:
     """手动"重启守护以应用更新"：强制体检 + 必要时重启，返回可读结论。"""
     before = cn.daemon_info()[1]
@@ -246,7 +281,7 @@ def _task_daemon_refresh() -> str:
         return "后台守护已重启为 v%s（原 v%s），新版本功能已生效。" % (
             cn.APP_VERSION, before or "未知")
     if out.get("stale"):
-        return "守护仍是旧版本（%s），且无法自动重启：%s\n请到「组件管理」检查值守组件。" % (
+        return "守护仍是旧版本（%s），且无法自动重启：%s\n请先停止守护后重新启动程序。" % (
             out.get("version") or "未知", out.get("reason") or "")
     return "后台守护已是当前版本 v%s，无需处理。" % cn.APP_VERSION
 
@@ -256,6 +291,25 @@ def _task_upgrade_apply() -> str:
     ok, msg = cn.apply_upgrade()
     if ok:
         cn.notify_system("校园网无感认证", msg)
+    return msg
+
+
+def _task_update_install() -> str:
+    """一键下载并升级：下载 Release 资产 → 校验 → 复用 apply_upgrade 就地替换。"""
+    info = cn.get_update_info()
+    if not (info.get("ok") and info.get("available")):
+        return "当前没有可用的新版本（请先点「检查更新」）"
+    path, err = cn.download_release_asset(info)
+    if not path:
+        return "下载失败：%s" % err
+    ok, msg = cn.apply_upgrade(path)
+    if not ok:
+        try:
+            os.remove(path)   # 升级没成功就别把安装包留在程序目录里
+        except OSError:
+            pass
+        return "升级失败：%s" % msg
+    cn.notify_system("校园网无感认证", msg)
     return msg
 
 
@@ -498,36 +552,33 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/connect":
                 self._connect(data)
             elif path == "/api/logout":
-                self._json({"ok": True,
-                            "rc": cn.cmd_logout(type("_A", (), {})())})
+                rc = cn.cmd_logout(type("_A", (), {})())
+                # 带上“手动下线静默期”剩余秒数：前端据此提示“不会马上被登回”，
+                # 否则用户会以为下线按钮没生效（旧版 30s 内自动登回）。
+                self._json({"ok": True, "rc": rc,
+                            "pause": cn.logout_pause_left()})
             elif path == "/api/daemon/start":
-                if not cn.daemon_component_installed():
-                    self._json({"ok": False,
-                                "error": "需要先安装「值守组件」（自动化 → 组件管理）"})
-                else:
-                    self._json({"ok": cn.start_daemon()})
+                self._json({"ok": cn.start_daemon()})
             elif path == "/api/daemon/stop":
                 self._json({"ok": cn.stop_daemon()})
             elif path == "/api/daemon/restart":
-                if not cn.daemon_component_installed():
-                    self._json({"ok": False,
-                                "error": "需要先安装「值守组件」（自动化 → 组件管理）"})
-                else:
-                    cn.stop_daemon()
-                    time.sleep(1)
-                    self._json({"ok": cn.start_daemon()})
+                cn.stop_daemon()
+                time.sleep(1)
+                self._json({"ok": cn.start_daemon()})
             elif path == "/api/autostart/install":
-                self._json({"ok": cn.install_autostart()})
+                ok, msg = cn.enable_autostart_service()
+                self._json({"ok": ok, "message": msg})
             elif path == "/api/autostart/uninstall":
-                self._json({"ok": cn.uninstall_autostart()})
-            elif path == "/api/components/install":
-                ok, msg = cn.install_component((data or {}).get("name", ""))
-                self._json({"ok": ok, "message": msg,
-                            "components": cn.components_status()})
-            elif path == "/api/components/uninstall":
-                ok, msg = cn.uninstall_component((data or {}).get("name", ""))
-                self._json({"ok": ok, "message": msg,
-                            "components": cn.components_status()})
+                ok, msg = cn.disable_autostart_service()
+                self._json({"ok": ok, "message": msg})
+            elif path == "/api/update/check":
+                self._json({"ok": True,
+                            "update": cn.check_latest_release(force=True)})
+            elif path == "/api/update/open":
+                self._json({"ok": cn.open_release_page()})
+            elif path == "/api/update/install":
+                # 一键下载并升级：下载/校验在后台任务里跑，前端每秒轮询结果
+                self._json({"id": _start_task(_task_update_install)})
             elif path == "/api/uninstall":
                 # 彻底卸载：释放并拉起同目录的独立卸载器。
                 # ⚠️ 必须在**独立进程**里做：Windows 下运行中的主 exe 无法删除
@@ -672,11 +723,15 @@ class Handler(BaseHTTPRequestHandler):
         client = cn.PortalClient(cfg)
         online, _ = client.check_online()
         if online:
+            cn.clear_logout_pause()  # 已在线 = 不再处于"手动下线"状态
             _wake_daemon()  # 告知守护：已在线，立即复核一轮
             self._json({"ok": True, "result": "already_online"})
             return
         res = client.login(cfg["username"], cred)
         if res.get("result") == "success":
+            # 「立即连接」= 用户现在就要联网：不清静默期的话，随后一掉线
+            # 守护会干等到静默期结束（最多 10 分钟）才重连
+            cn.clear_logout_pause()
             _wake_daemon()  # 登录成功 → 唤醒守护即时同步状态
             if res.get("userIndex"):
                 cn.update_state({"userIndex": res["userIndex"],
@@ -729,8 +784,10 @@ def serve(port: int = 0, host: str = "127.0.0.1"):
     srv = ThreadingHTTPServer((host, port), Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     # 界面一起来就体检后台守护：若守护还是升级前的旧版本，自动重启使其生效
-    # （用户只会"换 exe"，不会知道要去重启/重装组件）。延迟几秒避开首屏。
+    # （用户只会"换 exe"，不会知道要去重启）。延迟几秒避开首屏。
     _start_daemon_check_once()
+    _start_update_check_once()
+    _start_update_retry_loop()
     return srv, "http://127.0.0.1:%d/?token=%s" % (port, _AUTH_TOKEN)
 
 
@@ -931,7 +988,7 @@ input{font-family:inherit;font-size:inherit}
 .ds.stop{color:var(--muted)}
 .hint{font-size:11px;color:var(--muted)}
 
-/* ---------- 组件管理 / 部署提示 ---------- */
+/* ---------- 程序维护 / 部署提示 ---------- */
 .deploy-banner{
   display:none;align-items:flex-start;gap:12px;
   background:#fff7e6;border:1px solid rgba(255,159,39,.45);
@@ -1098,7 +1155,7 @@ input{font-family:inherit;font-size:inherit}
 
     <div class="content">
       <div class="deploy-banner" id="deployBanner">
-        <span>检测到当前目录<b>不是空文件夹</b>：建议将 exe 单独放入一个空文件夹运行，程序会在同目录生成配置与组件文件（本提示仅在全新部署时出现）。</span>
+        <span>检测到当前目录<b>不是空文件夹</b>：建议将 exe 单独放入一个空文件夹运行，程序会在同目录生成配置与状态文件（本提示仅在全新部署时出现）。</span>
         <button class="btn btn-ghost" id="deployBannerClose" style="flex-shrink:0">知道了</button>
       </div>
       <!-- 连接与账号 -->
@@ -1183,6 +1240,13 @@ input{font-family:inherit;font-size:inherit}
             <button class="btn btn-primary" id="btnUpgrade"
                     style="flex-shrink:0;margin-left:auto">立即升级</button>
           </div>
+          <!-- GitHub 上有更新版本：只提示并打开发布页，不自动下载替换 -->
+          <div class="warn-bar info" id="remoteUpdateWarn"
+               style="display:none;margin-top:10px">
+            <span id="remoteUpdateText"></span>
+            <button class="btn btn-primary" id="btnOpenRelease2"
+                    style="flex-shrink:0;margin-left:auto">打开发布页</button>
+          </div>
           <div class="warn-bar err" id="loginErrWarn" style="display:none;margin-top:10px"></div>
           <div class="warn-bar err" id="autostartWarn" style="display:none;margin-top:10px"></div>
           <div class="evt-bar" id="evtBar" style="display:none;margin-top:10px"></div>
@@ -1198,7 +1262,7 @@ input{font-family:inherit;font-size:inherit}
           <div class="row" style="margin-top:16px;justify-content:space-between">
             <div>
               <div style="font-size:13px;font-weight:600">开机后自动认证</div>
-              <div class="card-sub" style="margin-top:4px">登录后自动在后台启动守护，无需任何操作</div>
+              <div class="card-sub" style="margin-top:4px">写入开机自启并拉起后台守护，由同一个 exe 完成</div>
             </div>
             <div class="switch" id="swAuto"></div>
           </div>
@@ -1235,34 +1299,24 @@ input{font-family:inherit;font-size:inherit}
         </div>
 
         <div class="card">
-          <div class="card-title">组件管理</div>
-          <div class="card-sub">单文件便携模式：组件按需安装，卸载即移除对应文件</div>
+          <div class="card-title">程序维护</div>
+          <div class="card-sub">自启、守护、界面由同一个 exe 承担，无需安装额外组件</div>
           <div class="comp-row">
             <div class="comp-info">
-              <div class="comp-name">开机自启组件</div>
-              <div class="comp-sub">释放 Daemon.vbs · 写入注册表自启 · 开关见上方</div>
+              <div class="comp-name">一体化后台服务</div>
+              <div class="comp-sub">开机自启直接运行本程序 · 守护进程即同一个 exe</div>
             </div>
-            <span class="comp-state" id="compAutoState">—</span>
-            <button class="btn btn-ghost" id="btnCompAutoIns" style="flex-shrink:0">安装</button>
-            <button class="btn btn-ghost" id="btnCompAutoUnins" style="flex-shrink:0">卸载</button>
+            <span class="comp-state" id="serviceState">—</span>
           </div>
           <div class="comp-row">
             <div class="comp-info">
-              <div class="comp-name">值守组件</div>
-              <div class="comp-sub">释放守护启动器 vbs · 后台守护需先安装</div>
+              <div class="comp-name">版本更新</div>
+              <div class="comp-sub" id="updateSub">自动检查 GitHub Release（只检查，不下载）</div>
             </div>
-            <span class="comp-state" id="compDaemonState">—</span>
-            <button class="btn btn-ghost" id="btnCompDaemonIns" style="flex-shrink:0">安装</button>
-            <button class="btn btn-ghost" id="btnCompDaemonUnins" style="flex-shrink:0">卸载</button>
-          </div>
-          <div class="comp-row">
-            <div class="comp-info">
-              <div class="comp-name">界面启动器组件</div>
-              <div class="comp-sub">释放 UI.vbs · 静默拉起管理界面</div>
-            </div>
-            <span class="comp-state" id="compUiState">—</span>
-            <button class="btn btn-ghost" id="btnCompUiIns" style="flex-shrink:0">安装</button>
-            <button class="btn btn-ghost" id="btnCompUiUnins" style="flex-shrink:0">卸载</button>
+            <span class="comp-state" id="updateState">—</span>
+            <button class="btn btn-ghost" id="btnUpdateCheck" style="flex-shrink:0">检查更新</button>
+            <button class="btn btn-primary" id="btnUpdateInstall" style="flex-shrink:0;display:none">下载并升级</button>
+            <button class="btn btn-ghost" id="btnOpenRelease" style="flex-shrink:0;display:none">打开发布页</button>
           </div>
           <div class="comp-row">
             <div class="comp-info">
@@ -1272,7 +1326,7 @@ input{font-family:inherit;font-size:inherit}
             <span class="comp-state" id="compUninsState">—</span>
             <button class="btn btn-danger" id="btnPurge" style="flex-shrink:0">彻底卸载</button>
           </div>
-          <div class="hint" style="margin-top:12px">config.json / cred.bin 等配置数据首次运行自动生成，不属于组件</div>
+          <div class="hint" style="margin-top:12px">config.json / cred.bin 等配置数据首次运行自动生成；旧版残留的 Daemon.vbs / UI.vbs 会在彻底卸载时一并清理</div>
         </div>
 
         <div class="card">
@@ -1370,6 +1424,13 @@ const fmtClock = (ts) => {
   const d = new Date(ts * 1000);
   const p = n => String(n).padStart(2, '0');
   return p(d.getHours()) + ':' + p(d.getMinutes());
+};
+// unix 秒时间戳 -> "MM-DD HH:MM"（用于"上次检查更新"时间）
+const fmtStamp = (ts) => {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes());
 };
 
 let toastTimer = null;
@@ -1477,15 +1538,15 @@ function setService(v){
 /* ---------- 开关 ---------- */
 let swAutoVal = false;
 let swProxyGuardVal = true;   // true = proxy_guard 为 auto
-let compAuto = 'missing', compDaemon = 'missing', compUi = 'missing';
 let deployBannerDone = false;
 $('#swAuto').onclick = async () => {
   const want = !swAutoVal;
-  if (want && compAuto === 'missing'){ toast('请先安装「开机自启组件」（下方组件管理）', 3600); return; }
-  const ok = want ? await post('/api/autostart/install')
-                  : await post('/api/autostart/uninstall');
-  if (ok && ok.ok){ toast(want ? '已开启开机自启' : '已关闭开机自启'); load(); }
-  else toast('操作失败', 3200);
+  const r = want ? await post('/api/autostart/install')
+                 : await post('/api/autostart/uninstall');
+  if (r && r.ok){
+    toast(r.message || (want ? '已开启开机自启' : '已关闭开机自启'), 3600);
+    load();
+  } else toast((r && r.message) || '操作失败', 3200);
 };
 
 /* 系统代理守卫开关：只是改 config.json 的 proxy_guard，不动注册表 */
@@ -1575,27 +1636,43 @@ async function load(){
   swAutoVal = !!st.autostart;
   $('#swAuto').classList.toggle('on', swAutoVal);
 
-  // 组件状态
-  const comps = st.components || {};
-  compAuto = comps.autostart || 'missing';
-  compDaemon = comps.daemon || 'missing';
-  compUi = comps.ui || 'missing';
-  const autoMap = {missing:['未安装',''], installed:['已安装',''], enabled:['已启用','ok']};
-  const aa = autoMap[compAuto] || ['—',''];
-  const cAuto = $('#compAutoState');
-  cAuto.textContent = aa[0]; cAuto.className = 'comp-state ' + aa[1];
-  const cD = $('#compDaemonState');
-  cD.textContent = compDaemon === 'installed' ? '已安装' : '未安装';
-  cD.className = 'comp-state ' + (compDaemon === 'installed' ? 'ok' : '');
-  const cU = $('#compUiState');
-  cU.textContent = compUi === 'installed' ? '已安装' : '未安装';
-  cU.className = 'comp-state ' + (compUi === 'installed' ? 'ok' : '');
-  $('#btnCompAutoIns').disabled = compAuto !== 'missing';
-  $('#btnCompAutoUnins').disabled = compAuto === 'missing';
-  $('#btnCompDaemonIns').disabled = compDaemon !== 'missing';
-  $('#btnCompDaemonUnins').disabled = compDaemon === 'missing';
-  $('#btnCompUiIns').disabled = compUi !== 'missing';
-  $('#btnCompUiUnins').disabled = compUi === 'missing';
+  // 一体化服务状态（自启 + 守护都来自同一个 exe，没有"组件"概念）
+  const svcEl = $('#serviceState');
+  if (st.autostart && st.daemon){
+    svcEl.textContent = '运行中'; svcEl.className = 'comp-state ok';
+  } else if (st.autostart){
+    svcEl.textContent = '自启已开'; svcEl.className = 'comp-state warn';
+  } else {
+    svcEl.textContent = '仅当前会话'; svcEl.className = 'comp-state';
+  }
+
+  // 远程版本检查（只读状态缓存；实际请求由启动后自动检查 / 在线自动补查 / 按钮触发）
+  const upd = st.update || {};
+  const upState = $('#updateState');
+  const updWhen = upd.checked_at ? fmtStamp(upd.checked_at) : '';
+  upState.title = upd.error ? ('上次检查失败：' + upd.error) : '';
+  if (!upd.ok && upd.checked_at){
+    // 失败原因写进副标题：只写"检查失败"时用户无从判断是没网、限流还是别的问题
+    const reason = String(upd.error || '网络不可用').split('\n')[0].slice(0, 60);
+    $('#updateSub').textContent = '当前 v' + (st.app_version || '')
+      + ' · 上次检查 ' + updWhen + ' 失败：' + reason;
+  } else {
+    $('#updateSub').textContent = '当前 v' + (st.app_version || '')
+      + (updWhen ? ' · 上次检查 ' + updWhen : '')
+      + ' · 自动检查 GitHub Release（可一键下载升级）';
+  }
+  if (upd.available){
+    upState.textContent = 'v' + upd.latest + ' 可用';
+    upState.className = 'comp-state warn';
+    $('#btnUpdateInstall').style.display = '';
+    $('#btnOpenRelease').style.display = '';
+  } else {
+    $('#btnUpdateInstall').style.display = 'none';
+    $('#btnOpenRelease').style.display = 'none';
+    if (upd.ok){ upState.textContent = '已是最新'; upState.className = 'comp-state ok'; }
+    else if (upd.checked_at){ upState.textContent = '检查失败'; upState.className = 'comp-state warn'; }
+    else { upState.textContent = '待检查'; upState.className = 'comp-state'; }
+  }
 
   // 卸载器（主 exe 打开时自动释放到同目录；它是唯一能删掉主 exe 的东西）
   const cUn = $('#compUninsState');
@@ -1608,14 +1685,13 @@ async function load(){
     cUn.title = '内置卸载器未释放：可能构建时没打入，请重新构建或重新下载';
   }
 
-  // 守护按钮按上下文启用（未装值守组件时禁用并提示）
-  const daemonOk = compDaemon === 'installed';
-  $('#btnDStart').disabled = !!st.daemon || !daemonOk;
+  // 守护即当前 exe 的后台进程：无需任何前置组件，随时可启停
+  $('#btnDStart').disabled = !!st.daemon;
   $('#btnDStop').disabled = !st.daemon;
   $('#btnDRestart').disabled = !st.daemon;
-  $('#daemonCompHint').textContent = daemonOk
-    ? '值守组件已安装 · 守护以同一 exe 后台进程运行（不复制副本）'
-    : '值守组件未安装：请先在上方「组件管理」安装，方可启动守护';
+  $('#daemonCompHint').textContent = st.daemon
+    ? '守护以同一个 exe 在后台运行（开机自启也直接指向它）'
+    : '守护未运行：点「启动守护」即可，无需安装组件';
 
   // 自启已启用但守护未运行 → 警示 + 一键启动（守护异常自愈提示）
   $('#daemonWarn').style.display =
@@ -1651,6 +1727,15 @@ async function load(){
   } else {
     upEl.style.display = 'none';
   }
+  // GitHub 上有更新版本（只提示，不自动下载；发布页由系统浏览器打开）
+  const ruEl = $('#remoteUpdateWarn');
+  if (upd.available){
+    $('#remoteUpdateText').textContent = 'GitHub 上有新版本 v' + upd.latest
+      + (upd.name ? '（' + upd.name + '）' : '') + '，可前往发布页下载';
+    ruEl.style.display = 'flex';
+  } else {
+    ruEl.style.display = 'none';
+  }
   // 守护最近一次致命登录失败（last_error，成功后自动清除）
   const leEl = $('#loginErrWarn');
   if (st.last_error && st.last_error.msg) {
@@ -1666,6 +1751,7 @@ async function load(){
   if (evts.length){
     const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
                      login_ok:'ok', login_fail:'err', kickout:'warn',
+                     blocked:'err',
                      portal_fix:'warn', daemon_refresh:'warn', upgrade:'ok'};
     const EVT_MARK = {err:'✕', portal_fix:'⚠', daemon_refresh:'↻', upgrade:'↑'};
     const items = evts.slice(-3).reverse().map(ev => {
@@ -1764,8 +1850,14 @@ $('#btnConnect').onclick = async () => {
   load();
 };
 
-$('#btnLogout').onclick = async () => { await post('/api/logout'); toast('已下线'); load(); };
-$('#btnLogout2').onclick = async () => { await post('/api/logout'); toast('已下线'); load(); };
+const doLogout = async () => {
+  const r = await post('/api/logout');
+  const m = Math.round(((r && r.pause) || 0) / 60);
+  toast(m > 0 ? (`已下线，${m} 分钟内不会自动重连（点「立即连接」可恢复）`) : '已下线');
+  load();
+};
+$('#btnLogout').onclick = doLogout;
+$('#btnLogout2').onclick = doLogout;
 $('#btnRefresh').onclick = () => load();
 $('#btnCheck').onclick = async () => {
   const btn = $('#btnCheck');
@@ -1820,8 +1912,8 @@ $('#btnUpgrade').onclick = () => {
 };
 $('#btnSelfTest').onclick = () => withTask('/api/self-test', $('#btnSelfTest'), '自检中…', '自检');
 $('#btnHealth').onclick = () => {
-  if (compDaemon !== 'installed'){
-    toast('体检需要后台守护配合，请先安装「值守组件」', 3600);
+  if (!lastSt || !lastSt.daemon){
+    toast('体检需要后台守护配合，请先在下方点「启动守护」', 3600);
     return;
   }
   confirmDialog({
@@ -1832,37 +1924,44 @@ $('#btnHealth').onclick = () => {
   });
 };
 
-/* ---------- 组件管理 ---------- */
-async function compOp(action, name, btn){
-  busy(true, btn, '处理中…');
+/* ---------- 版本更新（自动检查 + 一键下载升级）---------- */
+async function checkUpdate(btn){
+  busy(true, btn, '检查中…');
   try{
-    const r = await post('/api/components/' + action, {name});
-    toast((r && r.message) ? r.message : (r && r.ok ? '操作成功' : '操作失败'), 3600);
-  }catch(e){ toast('出错：' + e, 3600); }
+    const r = await post('/api/update/check', {});
+    const u = (r && r.update) || {};
+    if (u.ok && u.available) toast('发现新版本 v' + u.latest, 4000);
+    else if (u.ok) toast('已是最新版本 v' + (u.latest || ''), 3200);
+    else toast('检查失败：' + (u.error || '网络不可用'), 4000);
+  }catch(e){ toast('检查失败：' + e, 4000); }
   busy(false, btn);
   load();
 }
-$('#btnCompAutoIns').onclick   = () => compOp('install', 'autostart', $('#btnCompAutoIns'));
-$('#btnCompAutoUnins').onclick = () => confirmDialog({
-  title: '卸载开机自启组件',
-  html: '将移除 <b>CampusNetAuthDaemon.vbs</b> 并删除注册表自启项。<br>再次启用时重新点「安装」即可。',
-  okText: '确认卸载',
-  onOk: () => compOp('uninstall', 'autostart', $('#btnCompAutoUnins'))
-});
-$('#btnCompDaemonIns').onclick   = () => compOp('install', 'daemon', $('#btnCompDaemonIns'));
-$('#btnCompDaemonUnins').onclick = () => confirmDialog({
-  title: '卸载值守组件',
-  html: '将移除 <b>CampusNetAuthDaemon.vbs</b> 守护启动器（不再复制 exe 副本）。<br>若守护正在运行，需先「停止守护」；若开机自启仍启用，需先卸载「开机自启组件」。',
-  okText: '确认卸载',
-  onOk: () => compOp('uninstall', 'daemon', $('#btnCompDaemonUnins'))
-});
-$('#btnCompUiIns').onclick   = () => compOp('install', 'ui', $('#btnCompUiIns'));
-$('#btnCompUiUnins').onclick = () => confirmDialog({
-  title: '卸载界面启动器组件',
-  html: '将移除 <b>CampusNetAuthUI.vbs</b> 静默启动器。',
-  okText: '确认卸载',
-  onOk: () => compOp('uninstall', 'ui', $('#btnCompUiUnins'))
-});
+async function openRelease(){
+  const url = (lastSt && lastSt.update && lastSt.update.url)
+    || 'https://github.com/Origin-XiChen/campus-net-auth/releases';
+  try{
+    const r = await post('/api/update/open', {});
+    if (!(r && r.ok)) toast('打开失败，请手动访问：' + url, 5000);
+  }catch(e){ toast('打开失败：' + e, 4000); }
+}
+$('#btnUpdateCheck').onclick = () => checkUpdate($('#btnUpdateCheck'));
+$('#btnOpenRelease').onclick = () => openRelease();
+// 一键下载并升级：下载/校验在后台任务里跑，前端用 withTask 轮询结果
+$('#btnUpdateInstall').onclick = () => {
+  const u = (lastSt && lastSt.update) || {};
+  const size = u.asset_size ? ('约 ' + (u.asset_size / 1048576).toFixed(1) + ' MB')
+                            : 'Release 资产';
+  confirmDialog({
+    title: '下载并升级到 v' + (u.latest || ''),
+    html: '将下载 <b>v' + esc(u.latest || '') + '</b>（' + size + '）并<b>就地升级</b>：'
+        + '停止守护 → 替换程序文件 → 用新版本重启守护。<br><br>'
+        + '下载后会校验 <b>SHA256 + 文件版本</b>；升级完成后需要<b>关闭并重新打开本界面</b>。确定继续？',
+    okText: '下载并升级',
+    onOk: () => withTask('/api/update/install', $('#btnUpdateInstall'), '下载中…', '下载并升级')
+  });
+};
+$('#btnOpenRelease2').onclick = () => openRelease();
 // 彻底卸载：打开同目录的独立卸载器（它自己的窗口里再确认一次）。
 // ⚠️ 必须是独立 exe：Windows 下运行中的主 exe 删不掉自己；卸载器会连本界面
 // 进程一起收掉，所以这里只负责把它拉起来，不做任何"先删点什么"的动作。

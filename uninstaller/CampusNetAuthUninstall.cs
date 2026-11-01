@@ -319,8 +319,8 @@ namespace CampusNetAuthUninstall
         /// 清理 %TEMP% 下的 _MEI*（PyInstaller onefile 解包目录）。
         ///
         /// 两道保险，避免伤到"别的正在运行的实例"（同名多份部署很常见）：
-        ///   1. 只删带本程序特征的（目录内含 CampusNetAuth 的启动器 vbs），
-        ///      免得把别的 PyInstaller 应用的解包目录删掉；
+        ///   1. 只删带本程序特征的（目录内含本程序内嵌资源，如卸载器 exe
+        ///      或旧版的启动器 vbs），免得把别的 PyInstaller 应用解包目录删掉；
         ///   2. **先探测是否正在被使用**：目录里有任何被映射/占用的文件
         ///      （python3xx.dll 等）就整体跳过，一个文件都不动 —— 否则会把
         ///      另一个正在跑的实例的解包目录删残，还会误报"卸载有残留"。
@@ -329,7 +329,10 @@ namespace CampusNetAuthUninstall
         private void CleanTempResidue()
         {
             string tmp = Path.GetTempPath();
-            string[] markers = { "CampusNetAuthDaemon.vbs", "CampusNetAuthUI.vbs" };
+            // 0.6.0 起不再内嵌 VBS，卸载器自身就是主 exe 解包目录里的特征文件。
+            // 保留两个 vbs 标记以清理旧版部署留下的 _MEI 残留。
+            string[] markers = { SelfName, "CampusNetAuthDaemon.vbs",
+                                  "CampusNetAuthUI.vbs" };
             string[] dirs;
             try { dirs = Directory.GetDirectories(tmp, "_MEI*"); }
             catch { return; }
