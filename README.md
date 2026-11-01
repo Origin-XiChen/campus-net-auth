@@ -38,7 +38,7 @@
 针对本机门户 `http://172.16.54.18/`（**锐捷 ePortal / SAM+**）逆向适配，运行时零第三方依赖。
 
 > **声明**：本仓库代码全部由 AI 编写，阅读源码时请谨慎（你可能会感到红温）。
-> 参与 AI：**DeepSeek V4 Flash**（主要代码）· **DeepSeek V4 Pro**（精细修理）· **Hy4 Preview**（部分精细修理）
+> 参与 AI：**DeepSeek V4.1 Flash + DeepSeek V4 Flash**（主要代码）· **DeepSeek V4 Pro**（精细修理）· **Hy4 Preview**（部分精细修理）
 
 ---
 
