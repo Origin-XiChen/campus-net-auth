@@ -1671,6 +1671,9 @@ class App(tk.Tk):
         if not cred:
             return {"result": "fail", "message": "尚未保存密码"}
         client = cn.PortalClient(cfg)
+        # 与 HTML 界面/守护同一个门：只在校园网内才清理系统代理
+        if client.portal_reachable():
+            cn.maybe_clear_proxy(cfg, reason="界面登录前清理系统代理")
         res = client.login(cfg.get("username", ""), cred)
         if isinstance(res, dict) and res.get("result") == "success":
             cn.clear_logout_pause()   # 用户手动登录 = 不再处于"手动下线"

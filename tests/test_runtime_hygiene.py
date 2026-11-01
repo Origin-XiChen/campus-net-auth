@@ -104,6 +104,7 @@ class TestLogoutPause(_StateDirMixin):
         client2.check_online.return_value = (True, None)
         with mock.patch.object(cn, "load_config", return_value=cfg2), \
                 mock.patch.object(cn, "CredentialStore") as store, \
+                mock.patch.object(cn, "maybe_clear_proxy"), \
                 mock.patch.object(cn, "PortalClient", return_value=client2):
             store.return_value.load.return_value = "pw"
             cn.cmd_login(mock.Mock(force=False))

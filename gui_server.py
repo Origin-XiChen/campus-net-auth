@@ -721,6 +721,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "尚未配置账号密码"})
             return
         client = cn.PortalClient(cfg)
+        # 与守护/CLI 同一道门：只在校园网内（门户直连可达）才清理系统代理，
+        # 校外不碰用户可能赖以联网的代理。检测到未开代理时本身也是零写入。
+        if client.portal_reachable():
+            cn.maybe_clear_proxy(cfg, reason="界面立即连接前清理系统代理")
         online, _ = client.check_online()
         if online:
             cn.clear_logout_pause()  # 已在线 = 不再处于"手动下线"状态
@@ -1751,7 +1755,7 @@ async function load(){
   if (evts.length){
     const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
                      login_ok:'ok', login_fail:'err', kickout:'warn',
-                     blocked:'err',
+                     blocked:'err', proxy:'warn',
                      portal_fix:'warn', daemon_refresh:'warn', upgrade:'ok'};
     const EVT_MARK = {err:'✕', portal_fix:'⚠', daemon_refresh:'↻', upgrade:'↑'};
     const items = evts.slice(-3).reverse().map(ev => {

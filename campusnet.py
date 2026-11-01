@@ -1585,9 +1585,13 @@ def record_event(kind, msg):
 
 # ============================ 系统代理守卫 ============================
 # 场景：关机前开着代理（Clash / v2ray / 各种"梯子"），开机后代理客户端随登录
-# 自启动，**系统代理（WinINET）仍是开着的**。此时浏览器/HTTP 客户端全部走
-# 127.0.0.1:<port>，而代理客户端的节点多半连不上（校园网还没认证、或节点本
-# 身被墙），于是"什么网页都打不开"，本程序的公网探测也全军覆没。
+# 自启动，**系统代理（WinINET）仍是开着的**。此时浏览器的 HTTP 全部交给
+# 127.0.0.1:<port> 的死代理，而代理客户端的节点多半连不上（校园网还没认证、
+# 或节点本身被墙）→ "什么网页都打不开"；走 urllib 的检查更新/一键下载也会挂。
+#
+# ⚠️ 本程序的**认证探测**（http_request → http.client 直连）不经过 WinINET，
+# 不受系统代理影响——所以"门户是否可达"可以用来判断是否在校园网内，也正因
+# 如此，代理守卫只在校园网内动作，校外一律不动用户的代理设置。
 #
 # 本模块只做**最小必要的事**：把 WinINET 的系统代理开关与 PAC 地址关掉。
 #   * 不改代理客户端的任何配置文件、不结束其进程（TUN 模式不在处理范围）；
@@ -1718,7 +1722,15 @@ def proxy_state():
     ps = _inet_read("ProxyServer") or ""
     pac = _inet_read("AutoConfigURL") or ""
     wpad = _inet_read("AutoDetect")
-    enabled = bool(int(pe)) if isinstance(pe, int) else False
+
+    def _flag(v):
+        # 正常是 REG_DWORD；个别旧工具会写成字符串 "1"，也一并识别
+        try:
+            return bool(int(v))
+        except (TypeError, ValueError):
+            return False
+
+    enabled = _flag(pe)
     active = enabled or bool(pac)
     bits = []
     if enabled:
@@ -1729,7 +1741,7 @@ def proxy_state():
         bits.append("未启用系统代理")
     detail = "；".join(bits)
     return {"enabled": enabled, "server": str(ps), "pac": str(pac),
-            "pac_wpad": (bool(int(wpad)) if isinstance(wpad, int) else False),
+            "pac_wpad": _flag(wpad),
             "active": active, "detail": detail}
 
 
@@ -1774,8 +1786,10 @@ def disable_system_proxy(reason="开机自动认证前清理代理", record=True
         ok = _inet_write("AutoConfigURL", None) and ok
     _inet_notify_changed()
 
-    out["changed"] = True
     out["ok"] = ok
+    # changed 必须跟着写入结果走：写失败时仍报 changed=True 会让调用方
+    # 记一条"已自动关闭代理"的假事件，排查时被带偏。
+    out["changed"] = bool(ok)
     if ok:
         log.info("已关闭系统代理（%s）%s", reason,
                  "｜原设置已备份，可随时恢复" if record else "")
@@ -3252,22 +3266,25 @@ def run_daemon(cfg, cred):
     write_pid()
     atexit.register(remove_pid)
 
-    # 开机后第一件事：清理系统代理。
+    # 开机后第一件事：清理系统代理（**仅限校园网内**）。
     # 关机前若开着代理，开机后代理客户端随登录自启、系统代理仍是开着的，
-    # 而它的节点在未认证的网络里连不上 → 所有 HTTP 全走死代理 → 本程序
-    # 的公网探测全部失败、浏览器"什么网页都打不开"。必须在第一轮探测
-    # **之前**处理，否则守护会先被误导成"网络不可达"而退避。
+    # 而它的节点在未认证的网络里连不上 → 浏览器"什么网页都打不开"，
+    # 本程序走 urllib 的检查更新 / 一键下载也会失败。
+    # 注意：认证探测走 http.client 直连、不经过 WinINET，所以"门户是否可达"
+    # 这个判断不会被死代理干扰；也正因如此，校外（家里/热点，门户不可达）
+    # 一律不动用户的代理设置——那里可能正是用户赖以联网的代理。
     # 只关 WinINET 系统代理与 PAC，不结束代理客户端进程，也不自动恢复。
+    client = PortalClient(cfg)
     proxy_guard_done = False
     try:
-        _pg = maybe_clear_proxy(cfg, reason="守护启动：开机后清理系统代理")
-        proxy_guard_done = bool(_pg.get("changed"))
-        if proxy_guard_done:
-            record_event("proxy", "开机检测到系统代理已开启，已自动关闭以保证认证可达")
+        if client.portal_reachable():
+            _pg = maybe_clear_proxy(cfg, reason="守护启动：认证前清理系统代理")
+            proxy_guard_done = bool(_pg.get("changed"))
+            if proxy_guard_done:
+                record_event("proxy", "检测到系统代理已开启，已自动关闭以保证网页可用")
     except Exception as e:  # noqa: BLE001
         log.debug("启动时清理代理失败（已忽略）: %r", e)
 
-    client = PortalClient(cfg)
     username = cfg["username"]
     interval = int(cfg.get("interval", 30))
     retry = int(cfg.get("retry_interval", 30))
@@ -3424,27 +3441,7 @@ def run_daemon(cfg, cred):
             # （在线路径每轮从 4 次 HTTP 降到 3 次并发）。
             # 校外网络（家里/热点/公共 WiFi）门户不可达，守护静默等待、绝不认证。
             if not portal_ok:
-                reachable = client.portal_reachable()
-                if not reachable:
-                    # 门户不可达时先排除"软性原因"：用户中途又把系统代理打开了
-                    # （代理客户端自愈、开机延迟启动的托盘程序重新写入等）。
-                    # 这种情况下的"门户不可达"是假象，清掉代理后立刻重探一次，
-                    # 命中就完全跳过退避——不必白等一个离线周期。
-                    # maybe_clear_proxy 幂等：本来就没开时代价只是一次注册表读。
-                    try:
-                        if maybe_clear_proxy(
-                                cfg, reason="门户不可达：复核系统代理"
-                        ).get("changed"):
-                            record_event(
-                                "proxy",
-                                "门户不可达时检测到系统代理被重新开启，已关闭并立即复核")
-                            if client.portal_reachable():
-                                log.info("关闭系统代理后门户恢复可达，立即认证")
-                                reachable = True
-                    except Exception as e:  # noqa: BLE001
-                        log.debug("门户不可达时复查代理失败（已忽略）: %r", e)
-
-                if not reachable:
+                if not client.portal_reachable():
                     wait = min(offline_interval * min(fail_streak + 1, 10),
                                max_interval)
                     if fail_streak == 0:
@@ -4186,10 +4183,12 @@ def cmd_login(args):
     if not cfg["username"] or not cred:
         log.error("尚未配置账号密码，请先运行: campusnet.py setup")
         return 1
-    # 手动登录同样先清代理：用户点「立即连接」时，系统代理开着一模一样会
-    # 让 check_online 误判成"未认证"、让 login 拿不到登录页。
-    maybe_clear_proxy(cfg, reason="立即登录前清理系统代理")
+    # 手动登录同样先清代理，但**只在校园网内**（门户直连可达）才动设置：
+    # 校外用户的系统代理可能正是上网所依赖的，不能因为点一次登录就关掉。
+    # 认证探测走 http.client 直连，不会被死代理干扰。
     client = PortalClient(cfg)
+    if client.portal_reachable():
+        maybe_clear_proxy(cfg, reason="立即登录前清理系统代理")
 
     if not getattr(args, "force", False):
         online, _ = client.check_online()
@@ -4250,8 +4249,10 @@ def cmd_once(args):
         log.error("尚未配置账号密码")
         return 1
     # 单次检测常用于"任务计划开机跑一次"，和守护走同一条代理守卫
-    maybe_clear_proxy(cfg, reason="单次检测前清理系统代理")
     client = PortalClient(cfg)
+    # 与守护同一道门：只在校园网内（门户直连可达）才清理系统代理
+    if client.portal_reachable():
+        maybe_clear_proxy(cfg, reason="单次检测前清理系统代理")
     online, login_page = client.check_authentication()
     if online:
         log.info("已在线，无需操作")

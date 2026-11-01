@@ -167,8 +167,9 @@ class TestDisableProxy(_StateDirMixin):
             return False                   # 模拟类型不匹配导致的写入失败
         with mock.patch.object(cn, "_inet_write", bad_write):
             r = cn.disable_system_proxy(record=False)
-        self.assertTrue(r["changed"])
         self.assertFalse(r["ok"])          # 不能静默成功
+        # changed 也必须跟着失败走：否则调用方会记"已自动关闭"的假事件
+        self.assertFalse(r["changed"])
 
     def test_disable_is_idempotent_and_keeps_first_backup(self):
         self.fake.values = dict(self.ON)
@@ -213,6 +214,23 @@ class TestDisableProxy(_StateDirMixin):
             r = cn.maybe_clear_proxy({"proxy_guard": "auto"})
         self.assertFalse(r["changed"])
         self.assertIn("error", r)
+
+
+class TestDaemonProxyGuardScope(unittest.TestCase):
+    """守护只在校园网内动代理：校外（门户不可达）不能关用户的代理。"""
+
+    def test_guard_runs_on_campus(self):
+        from tests.test_portal_recovery import DaemonReplay
+        replay = DaemonReplay(commands=["STOP"])
+        self.assertEqual(replay.run(), 0)
+        replay.proxy_guard.assert_called_once()
+
+    def test_guard_skipped_off_campus(self):
+        from tests.test_portal_recovery import DaemonReplay
+        replay = DaemonReplay(commands=["STOP"])
+        replay.client.portal_reachable = mock.Mock(return_value=False)
+        self.assertEqual(replay.run(), 0)
+        replay.proxy_guard.assert_not_called()
 
 
 class TestProxyGuardConfig(_StateDirMixin):

@@ -40,6 +40,8 @@ class DaemonReplay:
         self.logout = mock.Mock(return_value=(True, "TEST-ONLY"))
         self.notifications = mock.Mock()
         self.events = mock.Mock()
+        # 代理守卫会读真实注册表（甚至写），单测里必须换成假实现
+        self.proxy_guard = mock.Mock(return_value={"changed": False, "ok": True})
         self.outcome = None
 
     def probe(self):
@@ -72,13 +74,13 @@ class DaemonReplay:
                 "_start_addr_change_watcher": mock.Mock(),
                 "update_state": mock.Mock(), "save_state": mock.Mock(),
                 "load_state": mock.Mock(return_value={}),
-                "record_event": self.events, "self_exe_path": mock.Mock(return_value="TEST-EXE"),
+                "record_event": self.events,
+                "self_exe_path": mock.Mock(return_value="TEST-EXE"),
                 "logout_stale_session": self.logout,
                 "notify_system": self.notifications, "log": self.log,
                 # 代理守卫：回放测试不碰真实注册表，也不许它改测试机上的代理
                 # （否则测试结果会依赖本机"当前是否开着代理"）
-                "maybe_clear_proxy": mock.Mock(
-                    return_value={"changed": False, "ok": True}),
+                "maybe_clear_proxy": self.proxy_guard,
                 "http_request": mock.Mock(side_effect=AssertionError("unexpected HTTP")),
             }
             for name, value in patches.items():
@@ -108,7 +110,8 @@ class TestDaemonRecovery(unittest.TestCase):
         replay = DaemonReplay(page=False)
         replay.client.portal_reachable.return_value = False
         self.assertEqual(replay.run(), 0)
-        self.assertEqual(replay.client.portal_reachable.call_count, 1)
+        # 启动时的代理守卫会探一次门户，第一轮循环再探一次
+        self.assertEqual(replay.client.portal_reachable.call_count, 2)
         replay.client.login.assert_not_called()
         self.assertEqual(replay.waits, [10])
 
@@ -145,7 +148,8 @@ class TestDaemonRecovery(unittest.TestCase):
 
     def test_check_also_interrupts_unreachable_portal_wait(self):
         replay = DaemonReplay(commands=["CHECK", "STOP"])
-        replay.client.portal_reachable.side_effect = [False, True]
+        # 第一项给"启动时的代理守卫"，第二项给第一轮循环探测
+        replay.client.portal_reachable.side_effect = [False, False, True]
         self.assertEqual(replay.run(), 0)
         replay.client.login.assert_called_once()
         self.assertEqual(replay.waits, [10, 20])
@@ -201,9 +205,13 @@ class TestOnceRecovery(unittest.TestCase):
         self.client.interface = mock.Mock(return_value={})
         self.client.discover_login_page = mock.Mock(return_value=self.page)
         self.client.login = mock.Mock(return_value={"result": "success"})
+        # 代理守卫会先探一次门户（仅在校园网内才动代理）；单测固定为可达，
+        # 并把 maybe_clear_proxy 换成假实现，绝不让测试碰真实注册表。
+        self.client.portal_reachable = mock.Mock(return_value=True)
         with mock.patch.object(cn, "load_config", return_value=self.cfg), \
                 mock.patch.object(cn, "CredentialStore") as store, \
                 mock.patch.object(cn, "PortalClient", return_value=self.client), \
+                mock.patch.object(cn, "maybe_clear_proxy"), \
                 mock.patch.object(cn, "log"), \
                 mock.patch.object(cn, "http_request", side_effect=AssertionError("unexpected HTTP")):
             store.return_value.load.return_value = "dummy-password"
