@@ -801,7 +801,7 @@ def local_mac_text():
     """本机 MAC 的**兜底**来源（aa-bb-cc-dd-ee-ff）。
 
     uuid.getnode() 取的是“第一块网卡”，可能根本不是走校园网的那块（实测：
-    返回 74-3a-f4-ca-f3-ec，而 Wi-Fi 网卡是 74-3a-f4-ca-f3-eb）。因此它只能
+    返回的是另一块网卡的地址，与走校园网那块不一致）。因此它只能
     当候选：优先用 local_mac_for_ip（按本机 IPv4 反查同一块网卡）。
     """
     try:

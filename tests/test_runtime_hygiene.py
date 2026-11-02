@@ -38,8 +38,8 @@ class TestSanitizeConfig(_StateDirMixin):
         self.assertEqual(self.san(portal_base="")["portal_base"], "/eportal")
 
     def test_username_stripped(self):
-        self.assertEqual(self.san(username="  2311711106 ")["username"],
-                         "2311711106")
+        self.assertEqual(self.san(username="  1234567890 ")["username"],
+                         "1234567890")
         self.assertEqual(self.san(username=None)["username"], "")
 
     def test_logout_pause_clamped(self):
@@ -226,10 +226,10 @@ class TestCumulativeStats(_StateDirMixin):
 
 class TestMacByInterface(unittest.TestCase):
     def test_pick_mac_for_ip(self):
-        ifaces = [("10.9.1.2", "74-3a-f4-ca-f3-eb"),
+        ifaces = [("10.9.1.2", "74-3a-xx-xx-xx-eb"),
                   ("192.168.1.5", "aa-bb-cc-dd-ee-01")]
         self.assertEqual(cn.pick_mac_for_ip(ifaces, "10.9.1.2"),
-                         "74-3a-f4-ca-f3-eb")
+                         "74-3a-xx-xx-xx-eb")
         self.assertEqual(cn.pick_mac_for_ip(ifaces, "10.0.0.9"), "")
         self.assertEqual(cn.pick_mac_for_ip([], "10.9.1.2"), "")
         self.assertEqual(cn.pick_mac_for_ip(None, "10.9.1.2"), "")
@@ -242,13 +242,13 @@ class TestMacByInterface(unittest.TestCase):
         client = cn.PortalClient(cfg)
         with mock.patch.object(cn, "local_lan_ipv4", return_value="10.9.1.2"), \
                 mock.patch.object(cn, "local_mac_for_ip",
-                                  return_value="74-3a-f4-ca-f3-eb") as by_ip, \
+                                  return_value="74-3a-xx-xx-xx-eb") as by_ip, \
                 mock.patch.object(cn, "local_mac_text",
-                                  return_value="74-3a-f4-ca-f3-ec") as by_uuid:
+                                  return_value="74-3a-xx-xx-xx-ec") as by_uuid:
             qs = client.login_page_query()
         by_ip.assert_called_once_with("10.9.1.2")
         by_uuid.assert_not_called()
-        self.assertIn("wlanparameter=74-3a-f4-ca-f3-eb", qs)
+        self.assertIn("wlanparameter=74-3a-xx-xx-xx-eb", qs)
 
     def test_falls_back_to_uuid_when_interface_unknown(self):
         cfg = cn._sanitize_config(dict(
@@ -258,9 +258,9 @@ class TestMacByInterface(unittest.TestCase):
         with mock.patch.object(cn, "local_lan_ipv4", return_value="10.9.1.2"), \
                 mock.patch.object(cn, "local_mac_for_ip", return_value=""), \
                 mock.patch.object(cn, "local_mac_text",
-                                  return_value="74-3a-f4-ca-f3-ec"):
+                                  return_value="74-3a-xx-xx-xx-ec"):
             qs = client.login_page_query()
-        self.assertIn("wlanparameter=74-3a-f4-ca-f3-ec", qs)
+        self.assertIn("wlanparameter=74-3a-xx-xx-xx-ec", qs)
 
     def test_enumeration_never_raises(self):
         # 真机/CI 结果都可能是空列表，但绝不能抛
