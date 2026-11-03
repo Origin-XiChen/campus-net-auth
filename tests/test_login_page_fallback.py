@@ -64,26 +64,26 @@ class TestLoginPageQuery(unittest.TestCase):
     def test_configured_hints_produce_query_string(self):
         client = self.client({"wlanacname": "logic", "nasip": "10.253.0.17",
                               "wlanuserip": "10.9.1.2",
-                              "wlanparameter": "74-3a-f4-ca-f3-eb"})
+                              "wlanparameter": "74-3a-xx-xx-xx-eb"})
         parsed = urllib.parse.parse_qs(client.login_page_query(),
                                        keep_blank_values=True)
         self.assertEqual(parsed["wlanuserip"], ["10.9.1.2"])
         self.assertEqual(parsed["wlanacname"], ["logic"])
         self.assertEqual(parsed["nasip"], ["10.253.0.17"])
-        self.assertEqual(parsed["wlanparameter"], ["74-3a-f4-ca-f3-eb"])
+        self.assertEqual(parsed["wlanparameter"], ["74-3a-xx-xx-xx-eb"])
         self.assertEqual(parsed["url"], [""])
 
     def test_local_address_is_used_when_hints_leave_it_empty(self):
         client = self.client({"wlanacname": "logic", "nasip": "10.253.0.17"})
         with mock.patch.object(cn, "local_lan_ipv4",
-                               return_value="10.9.124.113") as ip, \
+                               return_value="10.9.1.2") as ip, \
                 mock.patch.object(cn, "local_mac_text",
-                                  return_value="74-3a-f4-ca-f3-eb") as mac:
+                                  return_value="74-3a-xx-xx-xx-eb") as mac:
             parsed = urllib.parse.parse_qs(client.login_page_query())
         ip.assert_called_once_with("portal.test")
         mac.assert_called_once()
-        self.assertEqual(parsed["wlanuserip"], ["10.9.124.113"])
-        self.assertEqual(parsed["wlanparameter"], ["74-3a-f4-ca-f3-eb"])
+        self.assertEqual(parsed["wlanuserip"], ["10.9.1.2"])
+        self.assertEqual(parsed["wlanparameter"], ["74-3a-xx-xx-xx-eb"])
 
     def test_missing_nasip_or_net_name_disables_synthesis(self):
         self.assertEqual(self.client({"nasip": "10.253.0.17"}).login_page_query(), "")
@@ -116,8 +116,8 @@ class TestSynthesizedLoginPageDiscovery(unittest.TestCase):
                         detect_targets=[], pin_pubkey=False,
                         login_page_hints={"wlanacname": "logic",
                                           "nasip": "10.253.0.17",
-                                          "wlanuserip": "10.9.124.113",
-                                          "wlanparameter": "74-3a-f4-ca-f3-eb"})
+                                          "wlanuserip": "10.9.1.2",
+                                          "wlanparameter": "74-3a-xx-xx-xx-eb"})
         self.client = cn.PortalClient(cn._sanitize_config(self.cfg))
         self.requests = []
         self.routes = {}
@@ -193,7 +193,7 @@ class TestCryptoFromPageInfo(_StateDirMixin):
         self.cfg = dict(cn.DEFAULT_CONFIG, portal_host="portal.test",
                         detect_targets=[], pin_pubkey=False)
         self.client = cn.PortalClient(self.cfg)
-        self.url = self.client.url("/eportal/index.jsp?wlanuserip=10.9.124.113")
+        self.url = self.client.url("/eportal/index.jsp?wlanuserip=10.9.1.2")
 
     def login(self, html, page_info, url=None):
         self.posts = []
@@ -224,7 +224,7 @@ class TestCryptoFromPageInfo(_StateDirMixin):
                                    "publicKeyExponent": EXP,
                                    "publicKeyModulus": MOD})
         self.assertEqual(result.get("result"), "success")
-        info.assert_called_once_with("wlanuserip=10.9.124.113")
+        info.assert_called_once_with("wlanuserip=10.9.1.2")
         payload = urllib.parse.parse_qs(self.posts[-1][2])
         self.assertEqual(payload["passwordEncrypt"], ["true"])
         # 密文 != 明文，且不是明文直传
