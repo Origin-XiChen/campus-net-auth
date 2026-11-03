@@ -3,6 +3,9 @@ cred.bin
 config.json
 state.json
 daemon.pid
+# 运行时锁与原子写临时文件
+*.lock
+*.tmp
 
 # ===== 运行时日志 =====
 *.log
@@ -60,8 +63,7 @@ _t_*.md
 _t_fixtures/
 
 # ===== 抓包证据（只保留脚本，排除抓包结果）=====
-probe/capture_result.json
-probe/capture_report.txt
+probe/capture_*
 
 # ===== 构建本机覆盖（含个人路径，绝不提交）=====
 _build_local.bat

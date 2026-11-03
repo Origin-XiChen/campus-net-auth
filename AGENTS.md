@@ -16,7 +16,7 @@
 git status -sb                 # 工作区是否干净、与远端是否一致
 git log --oneline -8           # 最近提交
 gh release list                # 最新 Release（gh 可能不在 PATH，见 §4）
-python -m unittest discover -s tests   # 全量离线单测（当前 232 项，应全绿）
+python -m unittest discover -s tests   # 全量离线单测（当前 245 项，应全绿）
 ```
 
 任何一项不符合预期（有未提交改动、单测红、版本对不上），先查清原因再动手。
@@ -125,6 +125,9 @@ python -m unittest discover -s tests   # 全量离线单测（当前 232 项，�
   `test_portal_discovery` / `test_portal_recovery` / `test_runtime_hygiene` /
   `test_update_check`），不要全堆进 `test_core.py`。
 - 涉及时间/网络/进程的用例，优先注入依赖（例如 `DaemonReplay`）而不是 sleep。
+- **隐私守卫**：`tests/test_privacy.py` 扫描全部 tracked 文本，拒绝真实账号/MAC、本机用户
+  路径、邮箱、token/私钥；新增示例数据必须用合成值并同步脚本里的 allowlist。失败信息只报
+  文件与类别、不回显原值，避免 CI 日志二次泄露。
 
 代码风格：注释写"为什么"（中文），不写复述代码的废话；不引入新依赖；不加没要求的抽象。
 
