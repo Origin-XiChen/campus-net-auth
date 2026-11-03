@@ -16,7 +16,7 @@
 git status -sb                 # 工作区是否干净、与远端是否一致
 git log --oneline -8           # 最近提交
 gh release list                # 最新 Release（gh 可能不在 PATH，见 §4）
-python -m unittest discover -s tests   # 全量离线单测（当前 200 项，应全绿）
+python -m unittest discover -s tests   # 全量离线单测（当前 232 项，应全绿）
 ```
 
 任何一项不符合预期（有未提交改动、单测红、版本对不上），先查清原因再动手。
@@ -74,7 +74,16 @@ python -m unittest discover -s tests   # 全量离线单测（当前 200 项，�
 6. **不把任意 URL 交给浏览器**：Release 链接只允许本仓库 releases 前缀。
 7. **不擅自做破坏性验证**：冒烟会临时停掉用户真实守护（结束自动恢复）；「一键体检」会真实
    断网约 75 秒——**必须先征得用户同意**。
-8. 公开评论/文档不写个人路径、账号、学号、MAC、token。
+8. **公开内容零真实个人信息**：代码、测试、示例、文档、注释、commit message、PR/issue
+   评论都不得出现真实学号/账号、姓名、MAC、内网 IP、主机名、userIndex、抓包内容或
+   token。统一使用合成占位值（如账号 `1234567890`、MAC `aa-bb-cc-dd-ee-01` /
+   `AABBCCDDEE01`）；MAC 必须是合法 12 位十六进制，**不得**保留真实前/后缀或用 `xx`
+   冒充。
+9. **脱敏不能弄坏测试**：修改 `RSA_GOLDEN` 或 README 对拍明文后，必须用同一自检密钥
+   重算期望密文，保证黄金向量仍可验证；不得留下失效向量或只改一半。
+10. **提交身份用 GitHub noreply**：不要把真实邮箱写进 `user.email`、提交说明或公开评论。
+11. **本地证据不外发**：`probe/` 抓包、`config.json`、`state.json`、`.workbuddy/`、
+    日志、截图均可能含真实信息，只限本机排障，绝不提交、上传或贴到公开评论。
 
 ## 4. 环境与工具链陷阱（都踩过）
 
@@ -105,6 +114,8 @@ python -m unittest discover -s tests   # 全量离线单测（当前 200 项，�
 | `gui_server.py` 内嵌前端 | `python check_ui.py`（JS 语法 / 标签配对 / id 引用） |
 | 协议 / 登录 / 发现 / 判定 | 新增或更新单测；必要时真机**只读**探测（绝不发凭据） |
 | 打包 / 版本 / 自启 / 升级 / 守护 | 重建 exe + `python smoke_regression.py`（全 PASS） |
+| 新增/修改测试、示例、文档、注释 | 无真实个人信息；MAC 用合法合成占位值；改 RSA 明文须重算黄金密文 |
+| 任意提交前 | `git diff --cached` 逐行自查；跑下方隐私扫描；确认未暂存 `probe/`、`config.json`、`state.json`、`.workbuddy/` |
 
 测试约定：
 
@@ -116,6 +127,15 @@ python -m unittest discover -s tests   # 全量离线单测（当前 200 项，�
 - 涉及时间/网络/进程的用例，优先注入依赖（例如 `DaemonReplay`）而不是 sleep。
 
 代码风格：注释写"为什么"（中文），不写复述代码的废话；不引入新依赖；不加没要求的抽象。
+
+隐私自查（提交前）：
+
+```bash
+git diff --cached                      # 逐行看新增内容，人工确认无真实身份/设备信息
+git grep -nE "([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}" -- .   # MAC 必须全是合成值
+git grep -nE "[A-Za-z]:[\\/]Users[\\/]|/home/[^/ ]+" -- .    # 本机用户路径
+git grep -nE "\b[0-9]{10}\b" -- .      # 人工确认全是占位值/时间戳/测试固定值
+```
 
 ## 6. 发布 Release 流程
 
@@ -172,7 +192,8 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 > **规则**：每发一次 Release 必须在表里补一行；未发布的 main 改动写在"当前开发线"。
 > 版本号以 `campusnet.py` 的 `APP_VERSION` 为准，本表只做摘要。
 
-**当前开发线**：`main`，`APP_VERSION = 0.6.3`，**与最新 Release V0.6.3 一致（无未发布的功能改动）**。
+**当前开发线**：`main`，`APP_VERSION = 0.6.3`，与最新 Release V0.6.3 一致；Release 之后
+有隐私清洗与测试修复提交（不改变功能与版本号，未重新发版）。
 具体提交以 `git log` / `git status -sb` 为准——本节不钉死提交号，避免文档一提交就过期。
 
 | 版本 | 日期 | 状态 | 要点 |
@@ -193,6 +214,10 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 
 ## 10. 已知残留与下一版候选
 
+- **历史标识不追溯（2026-11-03 决定）**：2026-11-03 之前的公开提交/PR 引用中可能留有
+  旧版测试数据里的真实账号与 MAC。已评估改写历史成本高、且无法保证清理第三方副本与
+  GitHub 引用缓存，决定不 force-push 追溯；现有 tracked 文件已清理干净，后续按 §3
+  红线不再新增。
 - **P2 大件未做**：`campusnet.py` 拆包（portal/crypt/cred/daemon/autostart/cli）、
   删除 `ui.py`（约 2000 行）改浏览器回退、6 个中文管理 `.bat` 的去留。
 - **更新包没有代码签名**：一键下载已校验大小 + GitHub API 的 sha256 + PE 版本/ProductName，
