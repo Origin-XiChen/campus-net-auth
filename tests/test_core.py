@@ -425,7 +425,7 @@ class TestStaleSessionRecovery(unittest.TestCase):
                 return {"result": "success", "message": "注销成功"}
 
         ok, detail = cn.logout_stale_session(
-            FakePortal(), "IDX123", "2510331221", "pw")
+            FakePortal(), "IDX123", "1234567890", "pw")
         self.assertTrue(ok)
         self.assertEqual(calls["ui"], "IDX123")
         self.assertTrue(calls["force"])
@@ -460,10 +460,10 @@ class TestStaleSessionRecovery(unittest.TestCase):
                             username=username, password=password)
                 return {"result": "success", "message": "ok"}
 
-        cn.logout_stale_session(FakePortal(), None, "2510331221", "secret")
+        cn.logout_stale_session(FakePortal(), None, "1234567890", "secret")
         self.assertIsNone(seen["ui"])
         self.assertTrue(seen["force"])
-        self.assertEqual(seen["username"], "2510331221")
+        self.assertEqual(seen["username"], "1234567890")
         self.assertEqual(seen["password"], "secret")
 
 

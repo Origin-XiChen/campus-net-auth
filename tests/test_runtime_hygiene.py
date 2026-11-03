@@ -226,10 +226,10 @@ class TestCumulativeStats(_StateDirMixin):
 
 class TestMacByInterface(unittest.TestCase):
     def test_pick_mac_for_ip(self):
-        ifaces = [("10.9.1.2", "74-3a-xx-xx-xx-eb"),
-                  ("192.168.1.5", "aa-bb-cc-dd-ee-01")]
+        ifaces = [("10.9.1.2", "aa-bb-cc-dd-ee-01"),
+                  ("192.168.1.5", "aa-bb-cc-dd-ee-02")]
         self.assertEqual(cn.pick_mac_for_ip(ifaces, "10.9.1.2"),
-                         "74-3a-xx-xx-xx-eb")
+                         "aa-bb-cc-dd-ee-01")
         self.assertEqual(cn.pick_mac_for_ip(ifaces, "10.0.0.9"), "")
         self.assertEqual(cn.pick_mac_for_ip([], "10.9.1.2"), "")
         self.assertEqual(cn.pick_mac_for_ip(None, "10.9.1.2"), "")
@@ -242,13 +242,13 @@ class TestMacByInterface(unittest.TestCase):
         client = cn.PortalClient(cfg)
         with mock.patch.object(cn, "local_lan_ipv4", return_value="10.9.1.2"), \
                 mock.patch.object(cn, "local_mac_for_ip",
-                                  return_value="74-3a-xx-xx-xx-eb") as by_ip, \
+                                  return_value="aa-bb-cc-dd-ee-01") as by_ip, \
                 mock.patch.object(cn, "local_mac_text",
-                                  return_value="74-3a-xx-xx-xx-ec") as by_uuid:
+                                  return_value="aa-bb-cc-dd-ee-02") as by_uuid:
             qs = client.login_page_query()
         by_ip.assert_called_once_with("10.9.1.2")
         by_uuid.assert_not_called()
-        self.assertIn("wlanparameter=74-3a-xx-xx-xx-eb", qs)
+        self.assertIn("wlanparameter=aa-bb-cc-dd-ee-01", qs)
 
     def test_falls_back_to_uuid_when_interface_unknown(self):
         cfg = cn._sanitize_config(dict(
@@ -258,9 +258,9 @@ class TestMacByInterface(unittest.TestCase):
         with mock.patch.object(cn, "local_lan_ipv4", return_value="10.9.1.2"), \
                 mock.patch.object(cn, "local_mac_for_ip", return_value=""), \
                 mock.patch.object(cn, "local_mac_text",
-                                  return_value="74-3a-xx-xx-xx-ec"):
+                                  return_value="aa-bb-cc-dd-ee-02"):
             qs = client.login_page_query()
-        self.assertIn("wlanparameter=74-3a-xx-xx-xx-ec", qs)
+        self.assertIn("wlanparameter=aa-bb-cc-dd-ee-02", qs)
 
     def test_enumeration_never_raises(self):
         # 真机/CI 结果都可能是空列表，但绝不能抛

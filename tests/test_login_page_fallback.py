@@ -64,13 +64,13 @@ class TestLoginPageQuery(unittest.TestCase):
     def test_configured_hints_produce_query_string(self):
         client = self.client({"wlanacname": "logic", "nasip": "10.253.0.17",
                               "wlanuserip": "10.9.1.2",
-                              "wlanparameter": "74-3a-xx-xx-xx-eb"})
+                              "wlanparameter": "aa-bb-cc-dd-ee-01"})
         parsed = urllib.parse.parse_qs(client.login_page_query(),
                                        keep_blank_values=True)
         self.assertEqual(parsed["wlanuserip"], ["10.9.1.2"])
         self.assertEqual(parsed["wlanacname"], ["logic"])
         self.assertEqual(parsed["nasip"], ["10.253.0.17"])
-        self.assertEqual(parsed["wlanparameter"], ["74-3a-xx-xx-xx-eb"])
+        self.assertEqual(parsed["wlanparameter"], ["aa-bb-cc-dd-ee-01"])
         self.assertEqual(parsed["url"], [""])
 
     def test_local_address_is_used_when_hints_leave_it_empty(self):
@@ -78,12 +78,12 @@ class TestLoginPageQuery(unittest.TestCase):
         with mock.patch.object(cn, "local_lan_ipv4",
                                return_value="10.9.1.2") as ip, \
                 mock.patch.object(cn, "local_mac_text",
-                                  return_value="74-3a-xx-xx-xx-eb") as mac:
+                                  return_value="aa-bb-cc-dd-ee-01") as mac:
             parsed = urllib.parse.parse_qs(client.login_page_query())
         ip.assert_called_once_with("portal.test")
         mac.assert_called_once()
         self.assertEqual(parsed["wlanuserip"], ["10.9.1.2"])
-        self.assertEqual(parsed["wlanparameter"], ["74-3a-xx-xx-xx-eb"])
+        self.assertEqual(parsed["wlanparameter"], ["aa-bb-cc-dd-ee-01"])
 
     def test_missing_nasip_or_net_name_disables_synthesis(self):
         self.assertEqual(self.client({"nasip": "10.253.0.17"}).login_page_query(), "")
@@ -117,7 +117,7 @@ class TestSynthesizedLoginPageDiscovery(unittest.TestCase):
                         login_page_hints={"wlanacname": "logic",
                                           "nasip": "10.253.0.17",
                                           "wlanuserip": "10.9.1.2",
-                                          "wlanparameter": "74-3a-xx-xx-xx-eb"})
+                                          "wlanparameter": "aa-bb-cc-dd-ee-01"})
         self.client = cn.PortalClient(cn._sanitize_config(self.cfg))
         self.requests = []
         self.routes = {}
