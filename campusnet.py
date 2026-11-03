@@ -138,7 +138,9 @@ _MEI_CLEANED = _cleanup_stale_mei()
 # 0.6.2 = 「检查更新」支持一键下载并升级（资产 SHA256 + 版本校验，仅限本仓库）
 # 0.6.3 = 系统代理守卫：开机/认证前检测到系统代理（含 PAC）先自动关闭，
 #         避免"关机前开着梯子→开机后代理仍是开的→什么网页都打不开"
-APP_VERSION = "0.6.3"
+# 0.6.4 = 隐私与测试数据加固（无运行时行为变更）：公开内容去除真实账号/MAC/本机路径，
+#         新增 tracked 文件隐私守卫，测试与文档统一使用合成占位值
+APP_VERSION = "0.6.4"
 GITHUB_REPO = "Origin-XiChen/campus-net-auth"
 GITHUB_RELEASES_URL = "https://github.com/%s/releases" % GITHUB_REPO
 GITHUB_API_LATEST = ("https://api.github.com/repos/%s/releases/latest"
