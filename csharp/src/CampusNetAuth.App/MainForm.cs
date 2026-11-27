@@ -19,6 +19,7 @@ public sealed class MainForm : Form
     private const int WmNclButtonDown = 0xA1;
     private const int WmNcCalcSize = 0x0083;
     private const int HtCaption = 2;
+    private const int WsCaption = 0x00C00000;
     private const int WsThickFrame = 0x00040000;
     private const int WsMinimizeBox = 0x00020000;
     private const int WsMaximizeBox = 0x00010000;
@@ -29,6 +30,7 @@ public sealed class MainForm : Form
     private const int ScRestore = 0xF120;
     private const uint TpmReturnCmd = 0x0100;
     private const uint TpmRightButton = 0x0002;
+
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwcpRound = 2;
 
@@ -80,6 +82,7 @@ public sealed class MainForm : Form
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     private bool _revealed;
+    private long _lastToggleTick;
 
     public MainForm(ApiServer server)
     {
@@ -142,7 +145,9 @@ public sealed class MainForm : Form
         {
             var cp = base.CreateParams;
             // 无边框但具备原生窗口能力：缩放、最小化/最大化动画、系统菜单（Alt+Space）
-            cp.Style |= WsThickFrame | WsMinimizeBox | WsMaximizeBox | WsSysMenu;
+            // WS_CAPTION：DWM 的最小化/最大化动画判定需要"有标题栏"的窗口；
+            // 非客户区已在 WM_NCCALCSIZE 里去掉了，所以视觉上仍是纯自绘界面
+            cp.Style |= WsCaption | WsThickFrame | WsMinimizeBox | WsMaximizeBox | WsSysMenu;
             return cp;
         }
     }
@@ -193,6 +198,18 @@ public sealed class MainForm : Form
     }
 
     /// <summary>标题栏右键 → 原生系统菜单（还原/移动/大小/最小化/最大化/关闭）。</summary>
+    /// <summary>最大化/还原切换（带 250ms 去抖，避免双击被两条路径各触发一次）。</summary>
+    private void ToggleMaximize()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastToggleTick < 250) return;
+        _lastToggleTick = now;
+        UpdateMaximizedBounds();
+        SendMessageW(Handle, WmSysCommand,
+            (IntPtr)(WindowState == FormWindowState.Maximized ? ScRestore : ScMaximize),
+            IntPtr.Zero);
+    }
+
     /// <summary>
     /// 原生拖拽：最大化时先把窗口就地还原到光标下（与系统"拖拽还原"一致），
     /// 再进入系统的移动循环（自带 Aero Snap / 贴边最大化动画）。
@@ -269,7 +286,10 @@ public sealed class MainForm : Form
   if (window.__cnaChromeHooked) return;
   window.__cnaChromeHooked = true;
 
-  // 标题栏拖动：.drag-region（原本给 pywebview 用）
+  // 标题栏拖动：按下不立即拖（否则系统移动循环会吞掉第二次点击，双击失效），
+  // 移动超过 4px 才开始系统拖拽；单击保持「只聚焦」，与原生标题栏一致。
+  // 双击交给页面自带的 dblclick → win('maximize')。
+  var cnaPendingDrag = null;
   window.addEventListener('mousedown', function(e){
     try{
       if (e.button !== 0) return;
@@ -277,9 +297,19 @@ public sealed class MainForm : Form
       if (!t || !t.closest) return;
       if (t.closest('.tb-btns')) return;
       if (!t.closest('.drag-region')) return;
+      cnaPendingDrag = { x: e.screenX, y: e.screenY };
+    }catch(_){}
+  }, true);
+  window.addEventListener('mousemove', function(e){
+    try{
+      if (!cnaPendingDrag) return;
+      if (Math.abs(e.screenX - cnaPendingDrag.x)
+          + Math.abs(e.screenY - cnaPendingDrag.y) < 4) return;
+      cnaPendingDrag = null;
       window.chrome.webview.postMessage({type:'drag'});
     }catch(_){}
   }, true);
+  window.addEventListener('mouseup', function(){ cnaPendingDrag = null; }, true);
 
   // 标题栏右键 → 原生系统菜单
   window.addEventListener('contextmenu', function(e){
@@ -344,6 +374,10 @@ public sealed class MainForm : Form
                     {
                         ReleaseCapture();
                         SendMessageW(Handle, WmNclButtonDown, (IntPtr)hit, IntPtr.Zero);
+                    }
+                    else if (type == "maximize")
+                    {
+                        ToggleMaximize();
                     }
                     else if (type == "sysmenu")
                     {
@@ -414,11 +448,8 @@ public sealed class MainForm : Form
                     SendMessageW(Handle, WmSysCommand, (IntPtr)ScMinimize, IntPtr.Zero);
                     break;
                 case "maximize":
-                    UpdateMaximizedBounds();
                     // 走系统命令：最大化/还原动画与原生窗口一致
-                    SendMessageW(Handle, WmSysCommand,
-                        (IntPtr)(WindowState == FormWindowState.Maximized ? ScRestore : ScMaximize),
-                        IntPtr.Zero);
+                    ToggleMaximize();
                     break;
                 case "close":
                     Close();
