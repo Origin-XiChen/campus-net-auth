@@ -17,13 +17,39 @@ public sealed class MainForm : Form
     private bool _closing;
 
     private const int WmNclButtonDown = 0xA1;
+    private const int WmNcCalcSize = 0x0083;
     private const int HtCaption = 2;
+    private const int WsThickFrame = 0x00040000;
+    private const int DwmwaWindowCornerPreference = 33;
+    private const int DwmwcpRound = 2;
+
+    // 边缘缩放：JS 命中区发消息 → 系统级 sizing 循环（与自绘标题栏拖动同一机制）
+    private static readonly Dictionary<string, int> ResizeHits = new()
+    {
+        ["left"] = 10, ["right"] = 11, ["top"] = 12,
+        ["topleft"] = 13, ["topright"] = 14,
+        ["bottom"] = 15, ["bottomleft"] = 16, ["bottomright"] = 17,
+    };
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Margins
+    {
+        public int Left, Right, Top, Bottom;
+    }
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessageW(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr,
+        ref int value, int size);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd,
+        ref Margins margins);
 
     public MainForm(ApiServer server)
     {
@@ -32,6 +58,7 @@ public sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(1180, 820);
+        MinimumSize = new Size(980, 660);
         BackColor = Color.FromArgb(0xF5, 0xF5, 0xF7);
         DoubleBuffered = true;
         KeyPreview = true;
@@ -67,6 +94,55 @@ public sealed class MainForm : Form
         };
     }
 
+    /// <summary>无边框但保留系统缩放能力（配合 JS 边缘命中区与 WM_NCCALCSIZE）。</summary>
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.Style |= WsThickFrame;
+            return cp;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        try
+        {
+            // Win11：系统圆角 + DWM 投影（与自绘 UI 的圆角风格一致）
+            var pref = DwmwcpRound;
+            DwmSetWindowAttribute(Handle, DwmwaWindowCornerPreference, ref pref, sizeof(int));
+            var margins = new Margins { Left = 1, Right = 1, Top = 1, Bottom = 1 };
+            DwmExtendFrameIntoClientArea(Handle, ref margins);
+        }
+        catch
+        {
+            // Win10/旧系统：忽略（无系统圆角，窗口仍可用）
+        }
+        UpdateMaximizedBounds();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmNcCalcSize && m.WParam != IntPtr.Zero)
+        {
+            // 去掉非客户区（边框），内容铺满窗口；缩放交给 JS 命中区
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
+    private void UpdateMaximizedBounds()
+    {
+        try
+        {
+            MaximizedBounds = Screen.FromControl(this).WorkingArea;
+        }
+        catch { }
+    }
+
     private async Task InitWebViewAsync()
     {
         try
@@ -83,11 +159,13 @@ public sealed class MainForm : Form
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
 
             // 自绘标题栏拖动：HTML 已有 .drag-region（原本给 pywebview 用），
-            // 这里在 WebView2 侧接管为系统级拖动（不修改 UI 代码）
+            // 这里在 WebView2 侧接管为系统级拖动/缩放（不修改 UI 代码）
             await core.AddScriptToExecuteOnDocumentCreatedAsync(@"
 (function(){
-  if (window.__cnaDragHooked) return;
-  window.__cnaDragHooked = true;
+  if (window.__cnaChromeHooked) return;
+  window.__cnaChromeHooked = true;
+
+  // 标题栏拖动：.drag-region（原本给 pywebview 用）
   window.addEventListener('mousedown', function(e){
     try{
       if (e.button !== 0) return;
@@ -98,17 +176,60 @@ public sealed class MainForm : Form
       window.chrome.webview.postMessage({type:'drag'});
     }catch(_){}
   }, true);
+
+  // 边缘缩放：8 个不可见命中区（5px 边 / 10px 角），触发系统 sizing
+  function addResizeZones(){
+    try{
+      if (document.getElementById('cna-resize-zones')) return;
+      var wrap = document.createElement('div');
+      wrap.id = 'cna-resize-zones';
+      wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none';
+      var zones = [
+        ['top', 'left:10px;right:10px;top:0;height:5px;cursor:n-resize'],
+        ['bottom', 'left:10px;right:10px;bottom:0;height:5px;cursor:s-resize'],
+        ['left', 'left:0;top:10px;bottom:10px;width:5px;cursor:w-resize'],
+        ['right', 'right:0;top:10px;bottom:10px;width:5px;cursor:e-resize'],
+        ['topleft', 'left:0;top:0;width:10px;height:10px;cursor:nw-resize'],
+        ['topright', 'right:0;top:0;width:10px;height:10px;cursor:ne-resize'],
+        ['bottomleft', 'left:0;bottom:0;width:10px;height:10px;cursor:sw-resize'],
+        ['bottomright', 'right:0;bottom:0;width:10px;height:10px;cursor:se-resize']
+      ];
+      zones.forEach(function(z){
+        var d = document.createElement('div');
+        d.style.cssText = 'position:absolute;pointer-events:auto;' + z[1];
+        d.addEventListener('mousedown', function(e){
+          if (e.button !== 0) return;
+          e.preventDefault(); e.stopPropagation();
+          window.chrome.webview.postMessage({type:'resize', dir:z[0]});
+        });
+        wrap.appendChild(d);
+      });
+      document.body.appendChild(wrap);
+    }catch(_){}
+  }
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', addResizeZones);
+  } else {
+    addResizeZones();
+  }
 })();
 ");
             core.WebMessageReceived += (_, e) =>
             {
                 try
                 {
-                    if (JsonNode.Parse(e.WebMessageAsJson) is JsonObject obj
-                        && obj.GetString("type") == "drag")
+                    if (JsonNode.Parse(e.WebMessageAsJson) is not JsonObject obj) return;
+                    var type = obj.GetString("type");
+                    if (type == "drag")
                     {
                         ReleaseCapture();
                         SendMessageW(Handle, WmNclButtonDown, (IntPtr)HtCaption, IntPtr.Zero);
+                    }
+                    else if (type == "resize"
+                             && ResizeHits.TryGetValue(obj.GetString("dir"), out var hit))
+                    {
+                        ReleaseCapture();
+                        SendMessageW(Handle, WmNclButtonDown, (IntPtr)hit, IntPtr.Zero);
                     }
                 }
                 catch { }
@@ -169,6 +290,7 @@ public sealed class MainForm : Form
                     WindowState = FormWindowState.Minimized;
                     break;
                 case "maximize":
+                    UpdateMaximizedBounds();
                     WindowState = WindowState == FormWindowState.Maximized
                         ? FormWindowState.Normal
                         : FormWindowState.Maximized;
