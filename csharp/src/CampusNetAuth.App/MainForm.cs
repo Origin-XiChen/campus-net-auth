@@ -346,7 +346,7 @@ public sealed class MainForm : Form
       if (document.getElementById('cna-resize-zones')) return;
       var wrap = document.createElement('div');
       wrap.id = 'cna-resize-zones';
-      wrap.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none';
+      wrap.style.cssText = 'position:fixed;inset:0;z-index:100000;pointer-events:none';
       var zones = [
         ['top', 'left:10px;right:10px;top:0;height:5px;cursor:n-resize'],
         ['bottom', 'left:10px;right:10px;bottom:0;height:5px;cursor:s-resize'],

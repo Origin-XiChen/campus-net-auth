@@ -1,6 +1,10 @@
 name: test
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   unit:
@@ -30,3 +34,15 @@ jobs:
         run: |
           python -c "import re; src=open('gui_server.py',encoding='utf-8').read(); open('_ci_ui_check.js','w',encoding='utf-8').write(re.search(r'<script>(.*?)</script>', src, re.S).group(1))"
           node --check _ci_ui_check.js
+
+  csharp:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build (C#)
+        run: dotnet build csharp/CampusNetAuth.slnx -v q --nologo
+      - name: Self-tests (offline)
+        run: dotnet run --project csharp/tests/CampusNetAuth.Tests -v q --nologo

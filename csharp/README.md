@@ -9,12 +9,13 @@
 
 ## 工具链
 
-- .NET SDK **10.0**（本机为 10.0.404，用户级安装在 `C:/Users/XiChen/.dotnet`）。
+- .NET SDK **10.0**（用户级安装即可，路径按本机 `%USERPROFILE%\.dotnet` 调整）。
   运行/构建前需要：
 
 ```bash
-export PATH="/c/Users/XiChen/.dotnet:$PATH"
-export DOTNET_ROOT="C:\Users\XiChen\.dotnet"   # 运行 apphost 时必需
+# Git Bash
+export PATH="$HOME/.dotnet:$PATH"
+export DOTNET_ROOT="$(cygpath -w "$HOME/.dotnet")"
 ```
 
 ## 构建与自检
