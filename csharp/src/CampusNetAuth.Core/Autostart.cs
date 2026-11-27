@@ -43,6 +43,31 @@ public static class Autostart
         return ok;
     }
 
+    /// <summary>
+    /// 卸载钩子用：只移除"指向本次安装根目录"的 Run 值。
+    /// 机器上可能还有另一份绿色部署在用同一个 Run 名，不能连带删掉。
+    /// </summary>
+    public static bool UninstallIfOwned()
+    {
+        try
+        {
+            var reference = ReferencedPath();
+            if (string.IsNullOrEmpty(reference) || !File.Exists(reference)) return false;
+            var installRoot = Path.GetDirectoryName(
+                Path.TrimEndingDirectorySeparator(AppInfo.BaseDir));
+            if (string.IsNullOrEmpty(installRoot)) return false;
+            var full = Path.GetFullPath(reference);
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(installRoot))
+                       + Path.DirectorySeparatorChar;
+            if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase)) return false;
+            return Uninstall();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static string? ReadValue()
     {
         try

@@ -107,18 +107,23 @@ powershell -ExecutionPolicy Bypass -File csharp/build_green.ps1 [-Version 0.7.0]
 - 受限沙箱里验证时需把 `DOTNET_BUNDLE_EXTRACT_BASE_DIR`、`CNA_DATA_DIR`、`TEMP/TMP`
   指向工作区内目录（工作区内的 exe 不能写 `%TEMP%` / `%LOCALAPPDATA%`）；真实用户无此限制。
 
-## 安装器（Velopack）
+## 安装器（Velopack + 自绘引导器）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1
-# 产物：csharp/dist/releases/CampusNetAuth-win-Setup.exe（PerUser / x64）
+powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1 [-Version 1.0.0-preview.3]
+# 产物（dist\releases）：
+#   CampusNetAuth-Installer.exe   自绘安装引导器（内嵌 Setup，推荐给用户）
+#   CampusNetAuth-win-Setup.exe   Velopack 一键安装（IT/命令行）
+#   *.nupkg / releases.win.json   应用内更新资产
 ```
 
-- 引导页使用浅色 splash + 品牌蓝进度条（与 UI 风格一致）；
-- 安装版由安装器管理文件：程序内 `upgrade` 会拒绝裸 exe 换位（`IsInstalledLayout()`）；
-  内置更新已接入 Velopack `UpdateManager`（GithubSource）——**发布 Release 时需同时
-  上传 `releases.win.json` 与 `*.nupkg`（vpk pack 产物）**，否则安装版检查不到更新；
-- 当前未签名：SmartScreen 会提示，正式分发需要代码签名证书。
+- 引导器是独立的 WinForms 自绘窗口（不依赖 WebView2，安装前也能运行）：安装位置可改、
+  右侧「选项」（安装后启动）、安装中禁止关闭；安装完成后的首次启动会自动迁移旧版配置、
+  凭据与自启，并把旧目录移入回收站；
+- 无界面参数：`--silent --dir <路径> --no-launch`（自动化/冒烟测试）；
+- 已有安装时自动锁定安装位置并显示「更新」；
+- 卸载钩子只移除**指向本安装目录**的 Run 值，不会误删另一份绿色部署的开机自启；
+- 引导器 108 MB（内嵌 62 MB Setup + 自包含运行时）；主程序仍需 WebView2。
 
 ## 从绿色版（0.6.x / 0.7.x）迁移到安装版
 

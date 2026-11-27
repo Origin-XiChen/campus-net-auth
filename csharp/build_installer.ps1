@@ -33,3 +33,24 @@ if (Test-Path $releases) { Remove-Item -Recurse -Force $releases }
     --outputDir $releases
 
 Write-Host "Done. Installer: $releases\CampusNetAuth-win-Setup.exe"
+
+# 自绘安装引导器：内嵌 Velopack Setup，输出单文件（安装按钮 / 路径 / 选项）
+$setup = Join-Path $releases "CampusNetAuth-win-Setup.exe"
+$boot = Join-Path $here "dist\installer"
+if (Test-Path $boot) { Remove-Item -Recurse -Force $boot }
+& (Join-Path $dotnetRoot "dotnet.exe") publish (Join-Path $here "src\CampusNetAuth.Setup") `
+    -c Release -r win-x64 --self-contained true `
+    -p:Version=$Version `
+    -p:SetupPayload=$setup `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:EnableCompressionInSingleFile=true `
+    -p:DebugType=None -p:DebugSymbols=false `
+    -o $boot
+Get-ChildItem -LiteralPath $boot -File |
+    Where-Object { $_.Name -ne 'CampusNetAuth-Installer.exe' } |
+    Remove-Item -Force
+Copy-Item (Join-Path $boot "CampusNetAuth-Installer.exe") `
+    (Join-Path $releases "CampusNetAuth-Installer.exe") -Force
+Write-Host ("Installer UI: {0} ({1:N1} MB)" -f (Join-Path $releases "CampusNetAuth-Installer.exe"),
+    ((Get-Item (Join-Path $releases "CampusNetAuth-Installer.exe")).Length / 1MB))

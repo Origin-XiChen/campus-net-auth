@@ -11,8 +11,9 @@ internal static class Program
         try
         {
             Velopack.VelopackApp.Build()
-                // 卸载会删程序文件但不知道我们的 Run 键：在钩子里移除，避免悬空自启
-                .OnBeforeUninstallFastCallback(_ => Autostart.Uninstall())
+                // 卸载会删程序文件但不知道我们的 Run 键：只移除指向本安装根目录的值，
+                // 避免连带删掉另一份绿色部署的自启
+                .OnBeforeUninstallFastCallback(_ => Autostart.UninstallIfOwned())
                 .Run();
         }
         catch { }

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>CampusNetAuth.Setup</RootNamespace>
+    <AssemblyName>CampusNetAuth-Installer</AssemblyName>
+    <Version>1.0.0-preview.3</Version>
+    <Product>CampusNetAuth</Product>
+    <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- build_installer.ps1 通过 -p:SetupPayload=... 传入 vpk 产出的 Setup.exe；
+         未提供时（开发构建）允许编译，运行时提示安装包缺失 -->
+    <EmbeddedResource Include="$(SetupPayload)"
+                      LogicalName="CampusNetAuth.Setup.SetupPayload.exe"
+                      Condition="'$(SetupPayload)' != '' and Exists('$(SetupPayload)')" />
+  </ItemGroup>
+
+</Project>
