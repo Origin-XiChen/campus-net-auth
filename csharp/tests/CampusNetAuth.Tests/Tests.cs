@@ -1,5 +1,7 @@
 namespace CampusNetAuth.Tests;
 
+using System.Text.Json.Nodes;
+
 public static class RsaGoldenTests
 {
     private const string Exp = "10001";
@@ -139,6 +141,28 @@ public static class ConfigTests
         Assert.Equal("10.1.2.3", hints.GetString("nasip"));
         Assert.Equal("logic", hints.GetString("wlanacname"));
     }
+
+    public static void SanitizeClamps()
+    {
+        var cfg = Config.Defaults();
+        cfg["interval"] = 1;
+        cfg["timeout"] = 999;
+        cfg["probe_timeout"] = 0;
+        cfg["logout_pause"] = -5;
+        cfg["max_interval"] = 10;
+        cfg["keepalive_interval"] = 1;
+        var s = Config.Sanitize(cfg);
+        Assert.Equal(5, s.GetInt("interval"), "interval 下限");
+        Assert.Equal(60, s.GetInt("timeout"), "timeout 上限");
+        Assert.Equal(1, s.GetInt("probe_timeout"), "probe_timeout 下限");
+        Assert.Equal(0, s.GetInt("logout_pause"), "logout_pause 下限");
+        Assert.Equal(60, s.GetInt("max_interval"), "max_interval 下限");
+        Assert.Equal(30, s.GetInt("keepalive_interval"), "keepalive 下限");
+
+        cfg = Config.Defaults();
+        cfg["timeout"] = "abc";
+        Assert.Equal(8, Config.Sanitize(cfg).GetInt("timeout"), "坏值回落默认");
+    }
 }
 
 public static class CryptoExtraTests
@@ -169,6 +193,13 @@ public static class HtmlTests
         Assert.False(PortalClient.LooksLikeEportalLogin(""), "空页面");
         Assert.False(PortalClient.LooksLikeEportalLogin(
             "<script>alert('WEB认证设备未注册')</script>"), "错误页");
+        Assert.True(PortalClient.LooksLikeEportalLogin(
+            "<input id='pwd' name='pwd' type='password'>"), "单引号 pwd");
+        Assert.False(PortalClient.LooksLikeEportalLogin(
+            "<form action='./ADMIN.do?method=login'><input id='pwd'></form>"),
+            "管理台 action 大小写不敏感");
+        Assert.False(PortalClient.LooksLikeEportalLogin(
+            "<input id='password' name='password'>"), "非 pwd 字段");
     }
 
     public static void ParseInputs()
@@ -181,5 +212,77 @@ public static class HtmlTests
         Assert.Equal("1", fields["x"]);
         Assert.Equal("2", fields["y"]);
         Assert.Equal("3", fields["z2"]);
+        Assert.Equal("3", fields["z"]);
+
+        var more = PortalClient.ParseInputs(
+            "<input id='p' name='q' value=''>" +
+            "<input type=\"hidden\" id=\"publicKeyExponent\" value=\"10001\">");
+        Assert.Equal("", more["p"]);
+        Assert.Equal("10001", more["publicKeyExponent"]);
+    }
+
+    public static void FormEncoding()
+    {
+        var encoded = PortalClient.FormEncode(new[]
+        {
+            new KeyValuePair<string, string>("a b", "c d"),
+            new KeyValuePair<string, string>("k", "x@y+z%"),
+            new KeyValuePair<string, string>("cn", "学"),
+        });
+        Assert.Equal("a+b=c+d&k=x%40y%2Bz%25&cn=%E5%AD%A6", encoded);
+    }
+}
+
+public static class UtilsTests
+{
+    public static void MaskAndUptime()
+    {
+        Assert.Equal("12******90", Utils.MaskUser("1234567890"));
+        Assert.Equal("abcd", Utils.MaskUser("abcd"));
+        Assert.Equal("ab*de", Utils.MaskUser("abcde"));
+        Assert.Equal("", Utils.MaskUser(""));
+
+        Assert.Equal("00:00", Utils.FmtUptime(0));
+        Assert.Equal("00:59", Utils.FmtUptime(59));
+        Assert.Equal("01:00", Utils.FmtUptime(60));
+        Assert.Equal("1:00:00", Utils.FmtUptime(3600));
+        Assert.Equal("1:01:01", Utils.FmtUptime(3661));
+        Assert.Equal("00:00", Utils.FmtUptime(-5), "负数按 0");
+
+        Assert.Equal("abc", Utils.Truncate("abc", 3));
+        Assert.Equal("ab", Utils.Truncate("abc", 2));
+    }
+}
+
+public static class StateTests
+{
+    public static void LogoutPauseRoundTrip()
+    {
+        State.Save(new JsonObject());
+        Assert.Equal(0L, LogoutPause.Left(), "初始静默期");
+
+        var until = LogoutPause.Set(3600);
+        Assert.True(until > Utils.Now(), "静默期在未来");
+        var left = LogoutPause.Left();
+        Assert.True(left > 3500 && left <= 3600, $"剩余秒数异常：{left}");
+
+        Assert.True(LogoutPause.Clear(), "清除静默期");
+        Assert.Equal(0L, LogoutPause.Left(), "清除后归零");
+        Assert.IsNull(State.Load()[AppInfo.LogoutPauseKey], "状态键已移除");
+    }
+
+    public static void EventLogMergeAndTrim()
+    {
+        State.Save(new JsonObject());
+        EventLog.Record("blocked", "第一次");
+        EventLog.Record("blocked", "第二次");
+        var events = State.Load()["events"] as JsonArray;
+        Assert.Equal(1, events!.Count, "同事件 60s 内合并");
+        Assert.Equal("第一次", ((JsonObject)events[0]!).GetString("msg"), "合并保留原文案");
+
+        for (var i = 0; i < 10; i++) EventLog.Record("k" + i, "m" + i);
+        events = State.Load()["events"] as JsonArray;
+        Assert.Equal(8, events!.Count, "最多保留 8 条");
+        Assert.Equal("k9", ((JsonObject)events[^1]!).GetString("kind"), "最新事件在末尾");
     }
 }

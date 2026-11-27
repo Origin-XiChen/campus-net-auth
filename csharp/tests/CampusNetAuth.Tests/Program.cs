@@ -76,6 +76,37 @@ public static class Program
 
     private static void Main(string[] args)
     {
+        // 自检不碰真实配置/状态：数据目录指向构建输出目录下的临时目录
+        // （受限沙箱里工作区内的 exe 不能往 %TEMP% 写；bin 已在 .gitignore 中）
+        var dataDir = Path.Combine(AppContext.BaseDirectory, "selftest_data");
+        try
+        {
+            if (Directory.Exists(dataDir)) Directory.Delete(dataDir, true);
+        }
+        catch
+        {
+        }
+        Directory.CreateDirectory(dataDir);
+        Environment.SetEnvironmentVariable("CNA_DATA_DIR", dataDir);
+        try
+        {
+            RunAll(args);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(dataDir)) Directory.Delete(dataDir, true);
+            }
+            catch
+            {
+                // 临时目录清理失败不影响测试结论
+            }
+        }
+    }
+
+    private static void RunAll(string[] args)
+    {
         var probe = ManualProbe(args);
         if (probe >= 0)
         {
@@ -90,9 +121,14 @@ public static class Program
         Run("版本比较", VersionTests.ComparesNumerically);
         Run("配置归一（坏值回落）", ConfigTests.SanitizeFallsBack);
         Run("配置归一（hints）", ConfigTests.SanitizeHints);
+        Run("配置归一（边界钳制）", ConfigTests.SanitizeClamps);
         Run("密码明文中 mac 缺省", CryptoExtraTests.LoginPlainDefaultMac);
         Run("登录页判定（学生页/管理台）", HtmlTests.LooksLikeLoginPage);
         Run("input 解析（id 优先、name 回退）", HtmlTests.ParseInputs);
+        Run("表单编码（空格/特殊字符）", HtmlTests.FormEncoding);
+        Run("工具函数（掩码/时长）", UtilsTests.MaskAndUptime);
+        Run("手动下线静默期（落盘/清除）", StateTests.LogoutPauseRoundTrip);
+        Run("事件记录（合并/上限）", StateTests.EventLogMergeAndTrim);
 
         Console.WriteLine();
         Console.WriteLine(Failures.Count == 0

@@ -16,13 +16,28 @@ export DOTNET_ROOT="C:\Users\XiChen\.dotnet"   # 运行 apphost 时必需
 ## 构建与自检
 
 ```bash
-dotnet build csharp/CampusNetAuth.sln
-dotnet run --project csharp/tests/CampusNetAuth.Tests
+dotnet build CampusNetAuth.slnx
+dotnet run --project tests/CampusNetAuth.Tests          # 默认离线自检
+dotnet run --project tests/CampusNetAuth.Tests -- --notify   # 手动探针：弹一条真实通知
 ```
 
 自检是零依赖控制台（不走 vstest）：沙箱里 `dotnet test` 的 testhost 会因
 `OpenProcess` 拒绝访问而启动失败。当前覆盖 **7 组 RSA 黄金向量**（与 Python 版
 逐字节一致）、反转/编码、版本比较、配置归一、登录页判定、input 解析。
+
+改 `ui/index.html` 后至少做一次静态校验（语法 + id 引用）：
+
+```bash
+python - <<'EOF'
+import re, pathlib
+html = pathlib.Path('ui/index.html').read_text(encoding='utf-8')
+pathlib.Path('.ui_check.js').write_text('\n'.join(re.findall(r'<script>(.*?)</script>', html, re.S)), encoding='utf-8')
+ids = set(re.findall(r'id="([^"]+)"', html))
+refs = set(re.findall(r"\$\('#([A-Za-z0-9_-]+)'\)", html))
+print('缺失 id:', sorted(refs - ids) or '无')
+EOF
+node --check .ui_check.js
+```
 
 ## 运行 CLI
 
@@ -40,10 +55,11 @@ stop / proxy / update / upgrade / install / uninstall / log / test`。
 - 里程碑 2：守护循环 + 控制通道、自启、代理守卫、更新检查/下载校验、就地升级、CLI
 - 里程碑 3（已完成）：本地 HTTP API（26 端点）+ WebView2 无边框窗口 + 托盘；
   页面加载后自动轮询 `/api/status`，token/回环 Host 校验生效
-- 里程碑 4（进行中）：**代码绘制**的图标（16–256 ICO + splash）与 Velopack
-  安装器已完成；
-  安装版内置更新（Velopack UpdateManager）与数据目录迁移到 `%APPDATA%` 待做；
-  与 Python 版行为对拍、迁移文档待做
+- 里程碑 4（已完成）：**代码绘制**的图标（16–256 ICO + splash）、Velopack
+  安装器、安装版内置更新（UpdateManager）、数据目录迁移到 `%APPDATA%`、
+  系统通知（AUMID + Shell_NotifyIcon，守护进程也能弹）、安装版卸载接管
+  （`Update.exe --uninstall`）、自启命令自愈 + 卸载时移除自启
+- 里程碑 5（进行中）：与 Python 版行为对拍、单测移植（当前 C# 自检 10 项）
 
 ## 图标（代码绘制，无 AI 水印）
 
@@ -81,6 +97,23 @@ powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1
   上传 `releases.win.json` 与 `*.nupkg`（vpk pack 产物）**，否则安装版检查不到更新；
 - 当前未签名：SmartScreen 会提示，正式分发需要代码签名证书。
 
+## 从 0.6.x（绿色版）迁移到 0.7.0（安装版）
+
+1. 运行 `CampusNetAuth-win-Setup.exe`（单用户安装，无需管理员）。安装器会装到
+   `%LOCALAPPDATA%\CampusNetAuth`，创建桌面与开始菜单快捷方式，并自动启动一次。
+2. **配置/凭据不会自动从旧绿色目录搬过来**：安装版只从自己的安装目录迁移
+   `config.json / cred.bin / state.json / campusnet.log`。旧目录里的数据需要手动复制：
+   先退出安装版（托盘「退出」），把旧目录的 `config.json`、`cred.bin` 复制到
+   `%APPDATA%\CampusNetAuth`，再启动安装版。
+3. **开机自启**：安装版启动时会把指向旧绿色目录的 Run 值改指安装版（另一份仍然存在
+   的绿色安装也会被接管——安装版是唯一正规入口）。改完旧的 `CampusNetAuth.exe daemon`
+   就不再随开机启动，可以删除旧绿色目录了。
+4. 守护与界面仍是同一个 exe 的两个进程，控制通道仍是 `127.0.0.1:47667`；
+   迁移期 C# 与 Python 守护互相可见（`VER` 协议互通），但不能同时跑两个守护。
+5. 卸载：界面「彻底卸载」或系统设置 → 应用。卸载会停止守护、移除开机自启、删除程序
+   文件与快捷方式；**`%APPDATA%\CampusNetAuth` 会保留**（重装免配置），需要彻底清理
+   请手动删除该目录。
+
 ## 原生窗口风格原则（重要）
 
 程序的**所有**原生窗口都应与 HTML UI 的极简风格一致：无边框自绘标题栏、
@@ -92,5 +125,5 @@ HTML 页面（本地 HTTP + WebView2）或按同一套视觉规范自绘。
 
 - 与 Python 版**共用** `127.0.0.1:47667` 和 `VER` 控制协议，两者不能同时运行守护；
   迁移期实测 C# CLI 可以读取 Python 守护的版本（协议互通）。
-- `config.json / cred.bin / state.json / campusnet.log` 仍在 exe 同目录（与 Python 版一致）；
-  安装器阶段再迁到 `%APPDATA%\CampusNetAuth` 并做一次性迁移。
+- 安装版数据在 `%APPDATA%\CampusNetAuth`，绿色/开发版仍在 exe 同目录；
+  安装版首次启动会从安装目录做一次性迁移（不覆盖已有文件）。
