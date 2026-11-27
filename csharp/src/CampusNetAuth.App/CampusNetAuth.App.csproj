@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>CampusNetAuth.App</RootNamespace>
     <AssemblyName>CampusNetAuth</AssemblyName>
-    <Version>1.0.0-preview.3</Version>
+    <Version>1.0.0</Version>
     <Product>CampusNetAuth</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
