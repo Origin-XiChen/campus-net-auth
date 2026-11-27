@@ -40,8 +40,21 @@ stop / proxy / update / upgrade / install / uninstall / log / test`。
 - 里程碑 2：守护循环 + 控制通道、自启、代理守卫、更新检查/下载校验、就地升级、CLI
 - 里程碑 3（已完成）：本地 HTTP API（26 端点）+ WebView2 无边框窗口 + 托盘；
   页面加载后自动轮询 `/api/status`，token/回环 Host 校验生效
-- 里程碑 4（待做）：应用图标（多尺寸 ICO）、安装器（Velopack/WiX）、
-  与 Python 版行为对拍、迁移文档
+- 里程碑 4（进行中）：图标（16–256 ICO + splash）与 Velopack 安装器已完成；
+  安装版内置更新（Velopack UpdateManager）与数据目录迁移到 `%APPDATA%` 待做；
+  与 Python 版行为对拍、迁移文档待做
+
+## 安装器（Velopack）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1
+# 产物：csharp/dist/releases/CampusNetAuth-win-Setup.exe（PerUser / x64）
+```
+
+- 引导页使用浅色 splash + 品牌蓝进度条（与 UI 风格一致）；
+- 安装版由安装器管理文件：程序内 `upgrade` 会拒绝裸 exe 换位（`IsInstalledLayout()`），
+  后续接入 Velopack UpdateManager 做内置更新；
+- 当前未签名：SmartScreen 会提示，正式分发需要代码签名证书。
 
 ## 原生窗口风格原则（重要）
 

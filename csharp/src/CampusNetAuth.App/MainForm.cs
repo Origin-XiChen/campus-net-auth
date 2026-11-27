@@ -42,9 +42,11 @@ public sealed class MainForm : Form
 
         _server.WindowAction += OnWindowAction;
 
+        var appIcon = Icon.ExtractAssociatedIcon(AppInfo.ExePath) ?? SystemIcons.Application;
+        Icon = appIcon;
         _tray = new NotifyIcon
         {
-            Icon = SystemIcons.Application,   // 图标里程碑替换为自绘图标
+            Icon = appIcon,
             Text = "校园网无感认证",
             Visible = true,
         };

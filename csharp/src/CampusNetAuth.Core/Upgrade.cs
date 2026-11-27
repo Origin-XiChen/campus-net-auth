@@ -50,6 +50,23 @@ public static class Upgrade
     public static string BackupPath =>
         AppInfo.ExePath + AppInfo.UpgradeBackupSuffix;
 
+    /// <summary>
+    /// 是否运行在安装器（Velopack）布局里：&lt;root&gt;\current\CampusNetAuth.exe，
+    /// 旁边有 Update.exe。安装版由安装器/更新器管理文件，不能用裸 exe 换位升级。
+    /// </summary>
+    public static bool IsInstalledLayout()
+    {
+        try
+        {
+            var parent = Directory.GetParent(AppInfo.BaseDir)?.FullName;
+            return parent != null && File.Exists(Path.Combine(parent, "Update.exe"));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static (string? Path, string? Version) FindCandidate()
     {
         var current = AppInfo.Version;
@@ -110,6 +127,11 @@ public static class Upgrade
 
     public static (bool Ok, string Message) Apply(string? newPath = null)
     {
+        if (IsInstalledLayout())
+        {
+            return (false, "当前是安装版（由安装器管理），请通过安装器升级；" +
+                           "内置更新将在后续里程碑接入 Velopack 更新器");
+        }
         var target = AppInfo.ExePath;
         string? ver;
         if (string.IsNullOrEmpty(newPath))

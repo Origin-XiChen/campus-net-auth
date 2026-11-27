@@ -7,6 +7,9 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // Velopack：处理安装/更新/卸载生命周期钩子（必须在任何 UI 之前调用）
+        try { Velopack.VelopackApp.Build().Run(); } catch { }
+
         var command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         if (command is "" or "ui") return RunUi(args);
         return Cli.Run(args);
