@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CampusNetAuth.App/CampusNetAuth.App.csproj" />
+    <Project Path="src/CampusNetAuth.Core/CampusNetAuth.Core.csproj" />
+    <Project Path="src/CampusNetAuth.Setup/CampusNetAuth.Setup.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CampusNetAuth.Tests/CampusNetAuth.Tests.csproj" />
+  </Folder>
+</Solution>

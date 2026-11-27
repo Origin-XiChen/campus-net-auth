@@ -70,3 +70,5 @@ _build_local.bat
 
 # ===== 例外：允许提交的配置模板 =====
 !config.example.json
+
+vibe_images/
