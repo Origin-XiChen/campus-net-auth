@@ -49,18 +49,21 @@ internal sealed class SetupForm : Form
         Text = "安装 校园网无感认证";
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(760, 440);
         BackColor = Bg;
         Font = new Font("Microsoft YaHei UI", 9F);
+        // AutoScale 必须早于 ClientSize/控件布局，否则 Form 不缩放、子控件却缩放 → 右侧/底部被裁
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ClientSize = new Size(800, 470);
         DoubleBuffered = true;
         KeyPreview = true;
-        AutoScaleMode = AutoScaleMode.Dpi;
-        AutoScaleDimensions = new SizeF(96F, 96F);
 
         Controls.Add(_content = new Panel { Dock = DockStyle.Fill, BackColor = Bg });
         Controls.Add(BuildTitleBar());
 
         var version = Installer.Version;
+        var sameVersion = _hasExisting && string.Equals(
+            _existingVer, version, StringComparison.OrdinalIgnoreCase);
         var icon = new PictureBox
         {
             Location = new Point(36, 66),
@@ -91,7 +94,9 @@ internal sealed class SetupForm : Form
 
         var pathLabel = new Label
         {
-            Text = _hasExisting ? "已安装位置（更新时不可更改）" : "安装位置",
+            Text = sameVersion
+                ? "已安装位置（重新安装时不可更改）"
+                : _hasExisting ? "已安装位置（更新时不可更改）" : "安装位置",
             ForeColor = TextSub,
             AutoSize = true,
             Location = new Point(36, 150),
@@ -101,7 +106,7 @@ internal sealed class SetupForm : Form
         _path = new TextBox
         {
             Location = new Point(36, 172),
-            Size = new Size(430, 30),
+            Size = new Size(440, 30),
             Text = _hasExisting ? _existingDir : Installer.DefaultDir,
             ReadOnly = _hasExisting,
             BackColor = _hasExisting ? Color.FromArgb(0xEE, 0xEE, 0xF2) : Color.White,
@@ -112,7 +117,7 @@ internal sealed class SetupForm : Form
         _browse = new RoundButton
         {
             Text = "更改…",
-            Location = new Point(476, 171),
+            Location = new Point(484, 171),
             Size = new Size(84, 30),
             Kind = RoundButton.Style.Ghost,
         };
@@ -122,20 +127,23 @@ internal sealed class SetupForm : Form
 
         _hint = new Label
         {
-            Text = _hasExisting
-                ? $"已安装 v{_existingVer ?? "?"}，将更新到 v{version}。配置、凭据与开机自启都会保留。"
-                : "安装完成后会自动导入旧版配置、凭据与开机自启，旧目录移入回收站（可恢复）。",
+            Text = sameVersion
+                ? $"已安装 v{_existingVer}；重新安装会原地覆盖程序文件，配置、凭据与开机自启都会保留。"
+                : _hasExisting
+                    ? $"已安装 v{_existingVer ?? "?"}，将更新到 v{version}。配置、凭据与开机自启都会保留。"
+                    : "安装完成后会自动导入旧版配置、凭据与开机自启，旧目录移入回收站（可恢复）。",
             ForeColor = TextSub,
             Location = new Point(36, 214),
-            Size = new Size(470, 54),
+            Size = new Size(500, 54),
         };
         _content.Controls.Add(_hint);
 
         var side = new Panel
         {
-            Location = new Point(560, 64),
-            Size = new Size(164, 250),
+            Location = new Point(580, 64),
+            Size = new Size(184, 200),
             BackColor = SideBg,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         _content.Controls.Add(side);
         side.Controls.Add(new Label
@@ -157,18 +165,21 @@ internal sealed class SetupForm : Form
         side.Controls.Add(_launchBack);
         side.Controls.Add(new Label
         {
-            Text = "数据保存在\n%APPDATA%\\CampusNetAuth，\n卸载时默认保留。",
+            Text = "数据目录\n%APPDATA%\\CampusNetAuth\n卸载时默认保留",
+            Font = new Font("Microsoft YaHei UI", 8.5F),
             ForeColor = TextSub,
-            AutoSize = true,
-            Location = new Point(14, 84),
+            AutoSize = false,
+            Size = new Size(156, 90),
+            Location = new Point(14, 82),
         });
 
         _install = new RoundButton
         {
-            Text = _hasExisting ? "更新" : "安装",
-            Location = new Point(600, 372),
+            Text = sameVersion ? "重新安装" : _hasExisting ? "更新" : "安装",
+            Location = new Point(640, 372),
             Size = new Size(124, 38),
             Kind = RoundButton.Style.Primary,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         _install.Click += (_, _) => BeginInstall();
         _content.Controls.Add(_install);
@@ -176,19 +187,22 @@ internal sealed class SetupForm : Form
         _cancel = new RoundButton
         {
             Text = "取消",
-            Location = new Point(470, 372),
+            Location = new Point(510, 372),
             Size = new Size(110, 38),
             Kind = RoundButton.Style.Ghost,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         _cancel.Click += (_, _) => { if (!_busy) Close(); };
         _content.Controls.Add(_cancel);
 
         _progressPanel = new Panel
         {
-            Location = new Point(36, 140),
-            Size = new Size(688, 220),
+            Location = new Point(36, 148),
+            Size = new Size(728, 208),
             BackColor = Bg,
             Visible = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Bottom |
+                     AnchorStyles.Left | AnchorStyles.Right,
         };
         _content.Controls.Add(_progressPanel);
         _status = new Label
@@ -197,25 +211,28 @@ internal sealed class SetupForm : Form
             Font = new Font("Microsoft YaHei UI", 11F),
             ForeColor = TextMain,
             Location = new Point(0, 10),
-            Size = new Size(660, 60),
+            Size = new Size(688, 60),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
         _progressPanel.Controls.Add(_status);
         _progress = new ProgressBar
         {
             Location = new Point(0, 78),
-            Size = new Size(660, 10),
+            Size = new Size(688, 10),
             Style = ProgressBarStyle.Marquee,
             MarqueeAnimationSpeed = 24,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
         _progressPanel.Controls.Add(_progress);
 
         _retry = new RoundButton
         {
             Text = "重试",
-            Location = new Point(564, 168),
+            Location = new Point(568, 156),
             Size = new Size(124, 38),
             Kind = RoundButton.Style.Primary,
             Visible = false,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         _retry.Click += (_, _) => BeginInstall();
         _progressPanel.Controls.Add(_retry);
@@ -223,10 +240,11 @@ internal sealed class SetupForm : Form
         _closeAfter = new RoundButton
         {
             Text = "关闭",
-            Location = new Point(434, 168),
+            Location = new Point(448, 156),
             Size = new Size(110, 38),
             Kind = RoundButton.Style.Ghost,
             Visible = false,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         _closeAfter.Click += (_, _) => Close();
         _progressPanel.Controls.Add(_closeAfter);
@@ -239,6 +257,8 @@ internal sealed class SetupForm : Form
         {
             if (_busy) e.Cancel = true;
         };
+        // 避免打开时路径框获得焦点并全选高亮
+        Shown += (_, _) => _install.Focus();
     }
 
     protected override CreateParams CreateParams
@@ -282,21 +302,27 @@ internal sealed class SetupForm : Form
         };
         bar.Controls.Add(title);
 
+        var closeHost = new Panel
+        {
+            Dock = DockStyle.Right,
+            Width = 52,
+            BackColor = Bg,
+        };
+        bar.Controls.Add(closeHost);
+
         var close = new Label
         {
             Text = "✕",
             Font = new Font("Microsoft YaHei UI", 11F),
             ForeColor = TextSub,
-            AutoSize = false,
-            Size = new Size(36, 30),
-            Location = new Point(ClientSize.Width - 56, 6),
+            Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
             Cursor = Cursors.Hand,
         };
         close.MouseEnter += (_, _) => close.ForeColor = TextMain;
         close.MouseLeave += (_, _) => close.ForeColor = TextSub;
         close.Click += (_, _) => { if (!_busy) Close(); };
-        bar.Controls.Add(close);
+        closeHost.Controls.Add(close);
 
         void Drag(object? _, MouseEventArgs e)
         {
