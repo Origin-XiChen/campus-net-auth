@@ -76,8 +76,9 @@ powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1
 ```
 
 - 引导页使用浅色 splash + 品牌蓝进度条（与 UI 风格一致）；
-- 安装版由安装器管理文件：程序内 `upgrade` 会拒绝裸 exe 换位（`IsInstalledLayout()`），
-  后续接入 Velopack UpdateManager 做内置更新；
+- 安装版由安装器管理文件：程序内 `upgrade` 会拒绝裸 exe 换位（`IsInstalledLayout()`）；
+  内置更新已接入 Velopack `UpdateManager`（GithubSource）——**发布 Release 时需同时
+  上传 `releases.win.json` 与 `*.nupkg`（vpk pack 产物）**，否则安装版检查不到更新；
 - 当前未签名：SmartScreen 会提示，正式分发需要代码签名证书。
 
 ## 原生窗口风格原则（重要）

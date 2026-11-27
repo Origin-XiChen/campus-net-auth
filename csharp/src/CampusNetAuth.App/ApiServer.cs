@@ -164,11 +164,22 @@ public sealed class ApiServer : IDisposable
                 });
             }
             case "/api/update/check":
-                return JsonResponse(new JsonObject { ["ok"] = true, ["update"] = UpdateCheck.CheckLatest(force: true) });
+                return JsonResponse(new JsonObject
+                {
+                    ["ok"] = true,
+                    ["update"] = AppInfo.IsInstalled
+                        ? VelopackUpdateInfo()
+                        : UpdateCheck.CheckLatest(force: true),
+                });
             case "/api/update/open":
                 return JsonResponse(new JsonObject { ["ok"] = UpdateCheck.OpenReleasePage() });
             case "/api/update/install":
-                return JsonResponse(new JsonObject { ["id"] = StartTask(UpdateInstallTask, "update_install") });
+                return JsonResponse(new JsonObject
+                {
+                    ["id"] = AppInfo.IsInstalled
+                        ? StartTask(VelopackUpdater.DownloadAndApply, "update_install")
+                        : StartTask(UpdateInstallTask, "update_install"),
+                });
             case "/api/upgrade/apply":
                 return JsonResponse(new JsonObject { ["id"] = StartTask(UpgradeTask, "upgrade") });
             case "/api/self-test":
@@ -480,6 +491,28 @@ public sealed class ApiServer : IDisposable
         if (!Daemon.Start())
             return $"守护仍是旧版本（{reason}），且无法自动重启：请先停止守护后重新启动程序。";
         return $"后台守护已重启为 v{AppInfo.Version}（原 v{before ?? "未知"}），新版本功能已生效。";
+    }
+
+    /// <summary>安装版：把 Velopack 检查结果映射成与 GitHub 检查一致的字段。</summary>
+    private static JsonObject VelopackUpdateInfo()
+    {
+        var (ok, message, update) = VelopackUpdater.Check();
+        var latest = update?.TargetFullRelease.Version.ToString() ?? "";
+        return new JsonObject
+        {
+            ["ok"] = ok,
+            ["current"] = AppInfo.Version,
+            ["latest"] = latest,
+            ["available"] = update != null,
+            ["url"] = AppInfo.GitHubReleasesUrl,
+            ["name"] = latest.Length > 0 ? AppInfo.AppName + " " + latest : "",
+            ["published_at"] = "",
+            ["checked_at"] = Utils.Now(),
+            ["error"] = ok ? "" : message,
+            ["asset_url"] = "",
+            ["asset_size"] = 0,
+            ["asset_sha256"] = "",
+        };
     }
 
     private string UpdateInstallTask()
