@@ -8,7 +8,14 @@ internal static class Program
     private static int Main(string[] args)
     {
         // Velopack：处理安装/更新/卸载生命周期钩子（必须在任何 UI 之前调用）
-        try { Velopack.VelopackApp.Build().Run(); } catch { }
+        try
+        {
+            Velopack.VelopackApp.Build()
+                // 卸载会删程序文件但不知道我们的 Run 键：在钩子里移除，避免悬空自启
+                .OnBeforeUninstallFastCallback(_ => Autostart.Uninstall())
+                .Run();
+        }
+        catch { }
 
         // 安装版：数据目录在 %APPDATA%；首次启动从 exe 同目录迁移旧数据
         AppInfo.MigrateDataIfNeeded();
@@ -26,6 +33,9 @@ internal static class Program
             MessageBox.Show("界面已在运行。", AppInfo.AppName);
             return 0;
         }
+
+        // 目录搬走 / 绿色版迁移到安装版后，把旧的 Run 值改指当前 exe（静默，失败无感）
+        Autostart.Repair();
 
         var firstDeploy = !File.Exists(AppInfo.StatePath);
         if (firstDeploy)
