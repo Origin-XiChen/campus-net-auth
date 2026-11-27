@@ -526,12 +526,12 @@ input{font-family:inherit;font-size:inherit}
           <div class="comp-row">
             <div class="comp-info">
               <div class="comp-name">彻底卸载本程序</div>
-              <div class="comp-sub">打开同目录的 <b id="uninsName">CampusNetAuthUninstall.exe</b>：停守护 → 删自启 → 清空本目录全部产物与缓存</div>
+              <div class="comp-sub" id="uninsSub">打开同目录的 <b>CampusNetAuthUninstall.exe</b>：停守护 → 删自启 → 清空本目录全部产物与缓存</div>
             </div>
             <span class="comp-state" id="compUninsState">—</span>
             <button class="btn btn-danger" id="btnPurge" style="flex-shrink:0">彻底卸载</button>
           </div>
-          <div class="hint" style="margin-top:12px">config.json / cred.bin 等配置数据首次运行自动生成；旧版残留的 Daemon.vbs / UI.vbs 会在彻底卸载时一并清理</div>
+          <div class="hint" style="margin-top:12px">配置 / 凭据 / 状态保存在数据目录（安装版为 %APPDATA%\CampusNetAuth），首次运行自动生成；卸载默认保留，重装后免配置</div>
         </div>
 
         <div class="card">
@@ -879,15 +879,22 @@ async function load(){
     else { upState.textContent = '待检查'; upState.className = 'comp-state'; }
   }
 
-  // 卸载器（主 exe 打开时自动释放到同目录；它是唯一能删掉主 exe 的东西）
+  // 卸载：安装版由安装器接管（Update.exe --uninstall）；绿色版没有独立卸载器
   const cUn = $('#compUninsState');
-  if (st.uninstaller) {
+  if (st.install_mode === 'installed') {
+    cUn.textContent = '安装版'; cUn.className = 'comp-state ok';
+    cUn.title = '由安装器管理：卸载会停止守护、删除开机自启、程序文件与快捷方式；数据目录默认保留';
+    $('#uninsSub').innerHTML = '由安装器接管：停守护 → 删自启 → 删除程序文件与快捷方式（数据目录默认保留）';
+    $('#btnPurge').textContent = '卸载程序';
+    $('#btnPurge').disabled = false;
+  } else if (st.uninstaller) {
     cUn.textContent = '已就绪'; cUn.className = 'comp-state ok';
     $('#btnPurge').disabled = false;
   } else {
-    cUn.textContent = '未释放'; cUn.className = 'comp-state warn';
+    cUn.textContent = '绿色版'; cUn.className = 'comp-state';
     $('#btnPurge').disabled = true;
-    cUn.title = '内置卸载器未释放：可能构建时没打入，请重新构建或重新下载';
+    cUn.title = '绿色版没有独立卸载器：先退出界面并停止守护，再删除整个程序目录即可';
+    $('#uninsSub').textContent = '绿色版：退出界面并停止守护后，直接删除整个程序目录即可';
   }
 
   // 守护即当前 exe 的后台进程：无需任何前置组件，随时可启停
@@ -1167,21 +1174,27 @@ $('#btnUpdateInstall').onclick = () => {
   });
 };
 $('#btnOpenRelease2').onclick = () => openRelease();
-// 彻底卸载：打开同目录的独立卸载器（它自己的窗口里再确认一次）。
-// ⚠️ 必须是独立 exe：Windows 下运行中的主 exe 删不掉自己；卸载器会连本界面
-// 进程一起收掉，所以这里只负责把它拉起来，不做任何"先删点什么"的动作。
+// 彻底卸载：安装版交给安装器自带的卸载程序；绿色版拉起同目录的独立卸载器（若有）。
+// ⚠️ 运行中的主 exe 删不掉自己：卸载程序会连本界面进程一起收掉，所以这里只负责
+// 把它拉起来，不做任何"先删点什么"的动作。
 $('#btnPurge').onclick = () => confirmDialog({
   title: '彻底卸载本程序',
-  html: '将打开 <b>CampusNetAuthUninstall.exe</b>：<br>'
+  html: (lastSt && lastSt.install_mode === 'installed')
+    ? '将启动安装器自带的卸载程序：<br>'
+      + '停止后台守护 → 删除开机自启项 → 删除程序文件与快捷方式。<br><br>'
+      + '配置、日志与凭据保存在 <b>%APPDATA%\\CampusNetAuth</b>，默认<b>不会</b>删除；'
+      + '如需彻底清理请卸载后手动删除该目录。<br>'
+      + '确认后请在弹出的卸载窗口里再次确认。'
+    : '将打开 <b>CampusNetAuthUninstall.exe</b>：<br>'
       + '停止后台守护 → 删除开机自启项 → 清空本目录的程序文件、日志与缓存。<br><br>'
       + '它<b>只删本程序自己的文件</b>（目录里你自己的文件会保留，目录也会保留）。<br>'
       + '确认后请在弹出的卸载窗口里再次确认。',
-  okText: '打开卸载程序',
+  okText: '启动卸载程序',
   onOk: async () => {
     try{
       const r = await post('/api/uninstall', {});
       toast((r && r.ok) ? (r.message || '卸载程序已启动')
-                        : ('启动失败：' + ((r && r.error) || '未知原因')), 5000);
+                        : ('启动失败：' + ((r && r.error) || (r && r.message) || '未知原因')), 5000);
     }catch(e){ toast('出错：' + e, 3600); }
   }
 });

@@ -230,11 +230,7 @@ public sealed class ApiServer : IDisposable
             case "/api/diagnose":
                 return JsonResponse(Diagnose());
             case "/api/uninstall":
-                return JsonResponse(new JsonObject
-                {
-                    ["ok"] = false,
-                    ["message"] = "卸载器将在安装器里程碑提供（当前请直接删除程序目录）",
-                });
+                return JsonResponse(LaunchUninstall());
             case "/api/window":
                 WindowAction?.Invoke(data.GetString("action"));
                 return JsonResponse(new JsonObject { ["ok"] = true });
@@ -324,7 +320,10 @@ public sealed class ApiServer : IDisposable
                 }
                 : null,
             ["update"] = UpdateCheck.Get(),
-            ["uninstaller"] = File.Exists(Path.Combine(AppInfo.BaseDir, "CampusNetAuthUninstall.exe")),
+            // 安装版由 Velopack 的 Update.exe --uninstall 接管；绿色版没有独立卸载器
+            ["install_mode"] = AppInfo.IsInstalled ? "installed" : "green",
+            ["uninstaller"] = AppInfo.IsInstalled
+                || File.Exists(Path.Combine(AppInfo.BaseDir, "CampusNetAuthUninstall.exe")),
             ["first_deploy"] = _firstDeploy,
             ["foreign_files"] = foreign,
             ["events"] = st["events"]?.DeepClone() ?? new JsonArray(),
@@ -562,6 +561,53 @@ public sealed class ApiServer : IDisposable
             sb.AppendLine(html != null ? $"登录页: {url}" : "登录页: 未发现（网关不劫持且 hints 未命中）");
         }
         return sb.ToString();
+    }
+
+    private static JsonObject LaunchUninstall()
+    {
+        if (!AppInfo.IsInstalled)
+        {
+            return new JsonObject
+            {
+                ["ok"] = false,
+                ["message"] = "绿色版没有独立卸载器：先退出界面并停止守护，再删除整个程序目录即可。",
+            };
+        }
+        try
+        {
+            // BaseDir 是 <root>\current（Velopack 布局），卸载器固定在 <root>\Update.exe
+            var root = Path.GetDirectoryName(
+                AppInfo.BaseDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            var updater = root == null ? null : Path.Combine(root, "Update.exe");
+            if (updater == null || !File.Exists(updater))
+            {
+                return new JsonObject { ["ok"] = false, ["error"] = "找不到安装器组件 Update.exe" };
+            }
+            // Update.exe --uninstall 会先强制结束本进程再删文件，所以响应必须先写完；
+            // 用后台线程等 HTTP 回包落地后再拉起，避免界面连"已启动"都收不到
+            new Thread(() =>
+            {
+                Thread.Sleep(400);
+                try
+                {
+                    Process.Start(new ProcessStartInfo(updater, "--uninstall")
+                    {
+                        WorkingDirectory = root,
+                        UseShellExecute = false,
+                    });
+                }
+                catch (Exception e)
+                {
+                    Log.Error("启动卸载器失败: {0}", e.Message);
+                }
+            })
+            { IsBackground = true }.Start();
+            return new JsonObject { ["ok"] = true, ["message"] = "卸载程序已启动" };
+        }
+        catch (Exception e)
+        {
+            return new JsonObject { ["ok"] = false, ["error"] = e.Message };
+        }
     }
 
     private string HealthTask()

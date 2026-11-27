@@ -1,4 +1,4 @@
-using System.Text;
+using CampusNetAuth;
 
 namespace CampusNetAuth.Tests;
 
@@ -64,8 +64,25 @@ public static class Program
         }
     }
 
-    private static void Main()
+    /// <summary>手动探针：确认真实系统气泡能弹（含守护进程那条临时图标通道），默认测试不触发。</summary>
+    private static int ManualProbe(string[] args)
     {
+        if (!args.Contains("--notify")) return -1;
+        var ok = Notify.System("校园网无感认证", "通知通道自检（临时图标通道）", 5, dedup: false);
+        Console.WriteLine(ok ? "notify dispatched" : "notify failed");
+        Thread.Sleep(1500);
+        return ok ? 0 : 1;
+    }
+
+    private static void Main(string[] args)
+    {
+        var probe = ManualProbe(args);
+        if (probe >= 0)
+        {
+            Environment.ExitCode = probe;
+            return;
+        }
+
         Run("RSA 黄金向量", RsaGoldenTests.GoldenVectors);
         Run("RSA 分块结构", RsaGoldenTests.BlockStructure);
         Run("反转按 UTF-16 code unit", RsaGoldenTests.ReverseUnitsMatchesJs);

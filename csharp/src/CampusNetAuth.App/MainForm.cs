@@ -121,6 +121,24 @@ public sealed class MainForm : Form
         _tray.ContextMenuStrip = menu;
         _tray.DoubleClick += (_, _) => RestoreWindow();
 
+        // 界面在跑时用常驻托盘图标弹通知：不额外闪现临时图标，点气球还能回到界面
+        Notify.UiBalloon = (title, message, timeout) =>
+        {
+            if (_closing || IsDisposed || !IsHandleCreated) return false;
+            BeginInvoke((Action)(() =>
+            {
+                try
+                {
+                    _tray.ShowBalloonTip(Math.Max(3, timeout) * 1000, title, message,
+                        ToolTipIcon.Info);
+                }
+                catch
+                {
+                }
+            }));
+            return true;
+        };
+
         Load += async (_, _) => await InitWebViewAsync();
         FormClosed += OnFormClosed;
         KeyDown += (_, e) =>
@@ -468,6 +486,7 @@ public sealed class MainForm : Form
     private void OnFormClosed(object? sender, FormClosedEventArgs e)
     {
         _closing = true;
+        Notify.UiBalloon = null;
         _server.WindowAction -= OnWindowAction;
         _tray.Visible = false;
         _tray.Dispose();
