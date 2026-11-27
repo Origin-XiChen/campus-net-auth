@@ -379,7 +379,13 @@ public sealed class ApiServer : IDisposable
     private JsonObject Connect(JsonObject data)
     {
         var cfg = Config.Load();
-        if (data["host"] != null) cfg["portal_host"] = data["host"]!.DeepClone();
+        if (data["host"] != null)
+        {
+            // 界面显示/提交的是 host:port；拆开存，否则会变成 host:80:80
+            var (h, p) = Utils.ParseHostPort(data.GetString("host"));
+            if (h != null) cfg["portal_host"] = h;
+            if (p != null) cfg["portal_port"] = p.Value;
+        }
         if (data["username"] != null) cfg["username"] = data["username"]!.DeepClone();
         if (data["service"] != null) cfg["service"] = data["service"]!.DeepClone();
         var password = data.GetString("password");

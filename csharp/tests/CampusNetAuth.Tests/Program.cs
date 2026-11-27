@@ -148,6 +148,8 @@ public static class Program
         Run("登录页判定（学生页/管理台）", HtmlTests.LooksLikeLoginPage);
         Run("input 解析（id 优先、name 回退）", HtmlTests.ParseInputs);
         Run("表单编码（空格/特殊字符）", HtmlTests.FormEncoding);
+        Run("门户地址 host:port 解析", HostPortTests.ParsesHostPort);
+        Run("配置归一（修复 host:port）", HostPortTests.SanitizeRepairsHostPort);
         Run("工具函数（掩码/时长）", UtilsTests.MaskAndUptime);
         Run("手动下线静默期（落盘/清除）", StateTests.LogoutPauseRoundTrip);
         Run("事件记录（合并/上限）", StateTests.EventLogMergeAndTrim);

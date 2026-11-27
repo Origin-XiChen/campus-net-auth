@@ -132,6 +132,12 @@ public static class Config
         cfg["recheck_interval"] = Math.Max(5, cfg.GetInt("recheck_interval", 30));
         cfg["logout_pause"] = Math.Clamp(cfg.GetInt("logout_pause", 600), 0, 86400);
 
+        // 界面「门户地址」是 host:port 形式：归一成 host + 独立端口，避免 :80:80
+        var (host, hostPort) = Utils.ParseHostPort(cfg.GetString("portal_host"));
+        if (host != null) cfg["portal_host"] = host;
+        if (hostPort != null) cfg["portal_port"] = hostPort.Value;
+        cfg["portal_port"] = Math.Clamp(cfg.GetInt("portal_port", 80), 1, 65535);
+
         var targets = cfg["detect_targets"] as JsonArray;
         var cleaned = new JsonArray();
         if (targets != null)

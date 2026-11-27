@@ -332,6 +332,45 @@ public static class CredentialStoreTests
     }
 }
 
+public static class HostPortTests
+{
+    public static void ParsesHostPort()
+    {
+        var (h, p) = Utils.ParseHostPort("172.16.54.18:80");
+        Assert.Equal("172.16.54.18", h, "host");
+        Assert.Equal(80, p, "port");
+        (h, p) = Utils.ParseHostPort("172.16.54.18");
+        Assert.Equal("172.16.54.18", h, "无端口 host");
+        Assert.IsNull(p, "无端口");
+        (h, p) = Utils.ParseHostPort("portal.example.edu:8443");
+        Assert.Equal("portal.example.edu", h, "主机名");
+        Assert.Equal(8443, p, "端口");
+        (h, p) = Utils.ParseHostPort("http://172.16.54.18:80/eportal");
+        Assert.IsNull(h, "拒绝协议头/路径");
+        Assert.IsNull(p, "拒绝协议头/路径端口");
+        (h, p) = Utils.ParseHostPort("bad host:80");
+        Assert.IsNull(h, "拒绝怪字符");
+        Assert.Equal(80, p, "端口仍可解析");
+    }
+
+    public static void SanitizeRepairsHostPort()
+    {
+        var cfg = Config.Defaults();
+        cfg["portal_host"] = "172.16.54.18:80";
+        cfg["portal_port"] = 80;
+        var s = Config.Sanitize(cfg);
+        Assert.Equal("172.16.54.18", s.GetString("portal_host"), "host 去端口");
+        Assert.Equal(80, s.GetInt("portal_port"), "端口保持");
+
+        cfg = Config.Defaults();
+        cfg["portal_host"] = "172.16.54.18:8080";
+        cfg["portal_port"] = 80;
+        s = Config.Sanitize(cfg);
+        Assert.Equal("172.16.54.18", s.GetString("portal_host"), "host 去端口");
+        Assert.Equal(8080, s.GetInt("portal_port"), "端口被地址覆盖");
+    }
+}
+
 public static class UtilsTests
 {
     public static void MaskAndUptime()
