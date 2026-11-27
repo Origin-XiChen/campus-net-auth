@@ -154,6 +154,7 @@ public static class Program
         Run("旧版清理安全阀", LegacyCleanupTests.SafetyValve);
         Run("旧版清理路径归属", LegacyCleanupTests.PathUnder);
         Run("守护手动停止标记", DaemonGuardTests.ManualStopMarker);
+        Run("凭据格式（Python 头/旧裸格式）", CredentialStoreTests.PythonHeaderAndLegacyRaw);
 
         Console.WriteLine();
         Console.WriteLine(Failures.Count == 0

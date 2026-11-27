@@ -1,5 +1,7 @@
 namespace CampusNetAuth.Tests;
 
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 
 public static class RsaGoldenTests
@@ -297,6 +299,36 @@ public static class DaemonGuardTests
         });
         Assert.False(DaemonGuard.ManuallyStoppedThisBoot(), "重启后失效");
         Assert.IsNull(State.Load()["daemon_manual_stop_tick"], "失效后清键");
+    }
+}
+
+public static class CredentialStoreTests
+{
+    public static void PythonHeaderAndLegacyRaw()
+    {
+        var path = AppInfo.CredPath;
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            Assert.True(CredentialStore.Save("Test@123456"), "保存");
+            var bytes = File.ReadAllBytes(path);
+            Assert.True(bytes.Length > 6
+                        && bytes[0] == (byte)'D' && bytes[1] == (byte)'P'
+                        && bytes[2] == (byte)'A' && bytes[3] == (byte)'P'
+                        && bytes[4] == (byte)'I' && bytes[5] == 1,
+                "DPAPI\\x01 头（与 Python 版一致）");
+            Assert.Equal("Test@123456", CredentialStore.Load(), "Python 头格式回读");
+
+            // 0.7.0 早期 C# 写入的裸 DPAPI blob 仍要能读
+            var legacy = ProtectedData.Protect(
+                Encoding.UTF8.GetBytes("Legacy@1"), null, DataProtectionScope.CurrentUser);
+            File.WriteAllBytes(path, legacy);
+            Assert.Equal("Legacy@1", CredentialStore.Load(), "裸格式兼容");
+        }
+        finally
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
     }
 }
 
