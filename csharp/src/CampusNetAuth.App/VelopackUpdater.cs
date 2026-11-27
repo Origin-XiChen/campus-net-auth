@@ -10,7 +10,9 @@ namespace CampusNetAuth.App;
 internal static class VelopackUpdater
 {
     private static UpdateManager Manager() =>
-        new(new GithubSource($"https://github.com/{AppInfo.GitHubRepo}", null, false));
+        new(new GithubSource($"https://github.com/{AppInfo.GitHubRepo}", null,
+            // 预发布构建才收预发布 Release；正式版只看 latest
+            AppInfo.Version.Contains('-')));
 
     public static (bool Ok, string Message, UpdateInfo? Update) Check()
     {

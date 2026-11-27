@@ -121,7 +121,11 @@ public static class VersionTests
         var info = Upgrade.PeVersion(dll);
         Assert.True(info != null, "读取程序集版本资源");
         Assert.Equal("CampusNetAuth.Core", info!.Value.Product, "ProductName 完整读取");
-        Assert.Equal(AppInfo.Version, info.Value.Version, "版本主三段");
+        // PE 的 FileVersion 只能数字段（1.0.0.0），与 SemVer 预发布号按数字段对齐
+        Assert.Equal(AppInfo.VerKey(AppInfo.Version)![0], AppInfo.VerKey(info.Value.Version)![0], "主版本");
+        Assert.Equal(
+            string.Join(".", AppInfo.VerKey(AppInfo.Version)!.Take(3)),
+            info.Value.Version, "版本主三段");
     }
 }
 

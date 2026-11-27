@@ -6,7 +6,8 @@ namespace CampusNetAuth;
 public static class AppInfo
 {
     public const string AppName = "CampusNetAuth";
-    public const string Version = "0.7.0";
+    // 1.0.0 起切安装版（Velopack）；预发布号用 SemVer2（-preview.N）
+    public const string Version = "1.0.0-preview.1";
 
     public const string GitHubRepo = "Origin-XiChen/campus-net-auth";
     public const string GitHubReleasesUrl = "https://github.com/" + GitHubRepo + "/releases";

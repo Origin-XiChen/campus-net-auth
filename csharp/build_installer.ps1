@@ -7,7 +7,7 @@ $env:PATH = "$dotnetRoot;$dotnetRoot\tools;$env:PATH"
 $env:DOTNET_ROOT = $dotnetRoot
 
 $version = (Select-String -Path (Join-Path $here "src\CampusNetAuth.Core\AppInfo.cs") `
-    -Pattern 'Version = "([0-9.]+)"').Matches[0].Groups[1].Value
+    -Pattern 'Version = "([0-9A-Za-z.+-]+)"').Matches[0].Groups[1].Value
 Write-Host "Packaging CampusNetAuth $version"
 
 $publish = Join-Path $here "dist\publish"

@@ -8,9 +8,9 @@ $env:PATH = "$dotnetRoot;$dotnetRoot\tools;$env:PATH"
 $env:DOTNET_ROOT = $dotnetRoot
 
 $appVersion = (Select-String -Path (Join-Path $here "src\CampusNetAuth.Core\AppInfo.cs") `
-    -Pattern 'Version = "([0-9.]+)"').Matches[0].Groups[1].Value
+    -Pattern 'Version = "([0-9A-Za-z.+-]+)"').Matches[0].Groups[1].Value
 $projVersion = (Select-String -Path (Join-Path $here "src\CampusNetAuth.App\CampusNetAuth.App.csproj") `
-    -Pattern '<Version>([0-9.]+)</Version>').Matches[0].Groups[1].Value
+    -Pattern '<Version>([0-9A-Za-z.+-]+)</Version>').Matches[0].Groups[1].Value
 if ($appVersion -ne $projVersion) {
     throw "Version mismatch: AppInfo.cs=$appVersion, CampusNetAuth.App.csproj=$projVersion (PE version would differ from --version)"
 }
