@@ -20,6 +20,12 @@ public sealed class MainForm : Form
     private const int WmNcCalcSize = 0x0083;
     private const int HtCaption = 2;
     private const int WsThickFrame = 0x00040000;
+    private const int WsMinimizeBox = 0x00020000;
+    private const int WsMaximizeBox = 0x00010000;
+    private const int WsSysMenu = 0x00080000;
+    private const int WmSysCommand = 0x0112;
+    private const uint TpmReturnCmd = 0x0100;
+    private const uint TpmRightButton = 0x0002;
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwcpRound = 2;
 
@@ -51,12 +57,35 @@ public sealed class MainForm : Form
     private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd,
         ref Margins margins);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point32
+    {
+        public int X, Y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool revert);
+
+    [DllImport("user32.dll")]
+    private static extern int TrackPopupMenuEx(IntPtr hMenu, uint flags,
+        int x, int y, IntPtr hWnd, IntPtr lptpm);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out Point32 pt);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    private bool _revealed;
+
     public MainForm(ApiServer server)
     {
         _server = server;
         Text = "校园网无感认证";
         FormBorderStyle = FormBorderStyle.None;
-        StartPosition = FormStartPosition.CenterScreen;
+        // 先离屏创建：等 WebView2 首帧加载完成再移动到屏幕中央，避免"白屏闪现"
+        StartPosition = FormStartPosition.Manual;
+        Location = new Point(-20000, -20000);
         Size = new Size(1180, 820);
         MinimumSize = new Size(980, 660);
         BackColor = Color.FromArgb(0xF5, 0xF5, 0xF7);
@@ -92,6 +121,15 @@ public sealed class MainForm : Form
         {
             if (e.KeyCode == Keys.Escape) Close();
         };
+
+        // 兜底：WebView2 初始化异常时也要让窗口出现在用户面前
+        var revealTimer = new System.Windows.Forms.Timer { Interval = 6000 };
+        revealTimer.Tick += (_, _) =>
+        {
+            revealTimer.Stop();
+            RevealWindow();
+        };
+        revealTimer.Start();
     }
 
     /// <summary>无边框但保留系统缩放能力（配合 JS 边缘命中区与 WM_NCCALCSIZE）。</summary>
@@ -100,7 +138,8 @@ public sealed class MainForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.Style |= WsThickFrame;
+            // 无边框但具备原生窗口能力：缩放、最小化/最大化动画、系统菜单（Alt+Space）
+            cp.Style |= WsThickFrame | WsMinimizeBox | WsMaximizeBox | WsSysMenu;
             return cp;
         }
     }
@@ -132,6 +171,39 @@ public sealed class MainForm : Form
             return;
         }
         base.WndProc(ref m);
+    }
+
+    /// <summary>首帧就绪后把离屏窗口移到屏幕中央（系统自带的窗口出现动画随即可见）。</summary>
+    private void RevealWindow()
+    {
+        if (_revealed) return;
+        _revealed = true;
+        try
+        {
+            var work = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(
+                work.Left + Math.Max(0, (work.Width - Width) / 2),
+                work.Top + Math.Max(0, (work.Height - Height) / 2));
+            Activate();
+        }
+        catch { }
+    }
+
+    /// <summary>标题栏右键 → 原生系统菜单（还原/移动/大小/最小化/最大化/关闭）。</summary>
+    private void ShowSystemMenu()
+    {
+        try
+        {
+            var menu = GetSystemMenu(Handle, false);
+            if (menu == IntPtr.Zero) return;
+            GetCursorPos(out var pt);
+            SetForegroundWindow(Handle);
+            var cmd = TrackPopupMenuEx(menu, TpmReturnCmd | TpmRightButton,
+                pt.X, pt.Y, Handle, IntPtr.Zero);
+            if (cmd != 0)
+                SendMessageW(Handle, WmSysCommand, (IntPtr)cmd, IntPtr.Zero);
+        }
+        catch { }
     }
 
     private void UpdateMaximizedBounds()
@@ -174,6 +246,17 @@ public sealed class MainForm : Form
       if (t.closest('.tb-btns')) return;
       if (!t.closest('.drag-region')) return;
       window.chrome.webview.postMessage({type:'drag'});
+    }catch(_){}
+  }, true);
+
+  // 标题栏右键 → 原生系统菜单
+  window.addEventListener('contextmenu', function(e){
+    try{
+      var t = e.target;
+      if (t && t.closest && t.closest('.drag-region') && !t.closest('.tb-btns')){
+        e.preventDefault();
+        window.chrome.webview.postMessage({type:'sysmenu'});
+      }
     }catch(_){}
   }, true);
 
@@ -231,15 +314,24 @@ public sealed class MainForm : Form
                         ReleaseCapture();
                         SendMessageW(Handle, WmNclButtonDown, (IntPtr)hit, IntPtr.Zero);
                     }
+                    else if (type == "sysmenu")
+                    {
+                        ShowSystemMenu();
+                    }
                 }
                 catch { }
             };
 
             _web.Source = new Uri(_server.Url);
+            core.NavigationCompleted += (_, e) =>
+            {
+                if (e.IsSuccess) RevealWindow();
+            };
         }
         catch (Exception e)
         {
             Log.Error("WebView2 初始化失败: {0}", e.Message);
+            RevealWindow();
             MessageBox.Show("界面组件（WebView2）初始化失败：\n" + e.Message +
                             "\n\n请确认系统已安装 Microsoft Edge WebView2 Runtime。",
                 "校园网无感认证");
