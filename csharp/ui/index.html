@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CampusNetAuth · 校园网无感认证</title>
+<style>
+:root{
+  --bg:#f5f5f7; --card:#fff; --secondary:#f2f2f6; --border:#d2d2d7;
+  --text:#1d1d1f; --muted:#5f5f66; --muted2:#84848a;
+  --primary:#007AFF; --primary-dark:#0066d6; --primary-50:#e8f1ff;
+  --success:#1f9d45; --success-50:#e7f8ec; --danger:#e0332a;
+  --danger-50:#ffeceb; --warn:#c26a00;
+  --radius:18px; --radius-md:12px; --radius-sm:9px;
+  --shadow:0 1px 2px rgba(0,0,0,.03),0 8px 24px rgba(0,0,0,.05);
+  --shadow-lg:0 12px 40px rgba(0,0,0,.14);
+  --tb-h:38px; --side-w:216px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",
+    "PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  background:var(--bg);color:var(--text);
+  font-size:13px;line-height:1.5;overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit;font-size:inherit;border:0;background:none;
+  cursor:pointer;color:inherit}
+input{font-family:inherit;font-size:inherit}
+
+/* ---------- 自绘标题栏 ---------- */
+.titlebar{
+  height:var(--tb-h);display:flex;align-items:center;
+  padding:0 14px;user-select:none;position:relative;z-index:50;
+  background:rgba(246,246,248,.82);
+  backdrop-filter:blur(30px) saturate(180%);
+  -webkit-backdrop-filter:blur(30px) saturate(180%);
+  border-bottom:.5px solid rgba(0,0,0,.07);
+}
+.tb-brand{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.tb-dot{width:9px;height:9px;border-radius:50%;background:var(--primary);
+  box-shadow:0 0 0 3px var(--primary-50);flex:none}
+.tb-title{font-size:12.5px;font-weight:600;letter-spacing:.2px}
+.tb-sub{font-size:11.5px;color:var(--muted);margin-left:2px}
+.tb-btns{display:flex;gap:8px;align-items:center}
+.tb-btn{width:12px;height:12px;border-radius:50%;position:relative;
+  transition:filter .15s}
+.tb-btn:hover{filter:brightness(.92)}
+.tb-close{background:#FF5F57}.tb-min{background:#FEBC2E}.tb-max{background:#28C840}
+.tb-btn:active{transform:scale(.94)}
+
+/* ---------- 布局 ---------- */
+.app{display:flex;height:calc(100% - var(--tb-h))}
+.sidebar{
+  width:var(--side-w);flex:none;display:flex;flex-direction:column;
+  padding:18px 12px 14px;
+  background:rgba(246,246,248,.72);
+  backdrop-filter:blur(30px) saturate(180%);
+  -webkit-backdrop-filter:blur(30px) saturate(180%);
+  border-right:.5px solid rgba(0,0,0,.07);
+}
+.side-head{padding:0 8px 18px}
+.side-logo{font-size:15px;font-weight:700;letter-spacing:.2px}
+.side-logo-sub{font-size:11px;color:var(--muted);margin-top:3px}
+.nav{display:flex;flex-direction:column;gap:3px}
+.nav-item{
+  display:flex;align-items:center;gap:10px;padding:9px 11px;
+  border-radius:11px;color:var(--muted);font-size:13px;font-weight:500;
+  transition:background .18s,color .18s;text-align:left;width:100%;
+}
+.nav-item:hover{background:rgba(255,255,255,.6);color:var(--text)}
+.nav-item.active{
+  background:var(--card);color:var(--primary);font-weight:600;
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.05);
+}
+.nav-ico{width:17px;height:17px;flex:none;opacity:.9}
+.side-foot{margin-top:auto;padding:12px 10px 0;font-size:10.5px;
+  color:var(--muted);line-height:1.55;
+  border-top:.5px solid rgba(0,0,0,.06)}
+
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{
+  height:46px;flex:none;display:flex;align-items:center;
+  justify-content:space-between;padding:0 22px;
+}
+.topbar-sub{font-size:12px;color:var(--muted)}
+.state{display:flex;align-items:center;gap:7px;font-size:12.5px;
+  font-weight:700}
+.state .ok{color:var(--success)}
+.state .warn{color:var(--warn)}
+.state .err{color:var(--danger)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted2);
+  flex:none;transition:background .3s}
+.dot.live{animation:breathe 2s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:1}50%{opacity:.3}}
+.dot.green{background:var(--success)}
+.dot.red{background:var(--danger)}
+.dot.orange{background:var(--warn)}
+
+.content{flex:1;overflow-y:auto;padding:0 22px 22px;scroll-behavior:smooth}
+.content::-webkit-scrollbar{width:9px}
+.content::-webkit-scrollbar-thumb{background:rgba(0,0,0,.16);
+  border-radius:9px;border:2px solid transparent;background-clip:padding-box}
+.content::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);
+  background-clip:padding-box;border:2px solid transparent}
+.content::-webkit-scrollbar-track{background:transparent}
+
+.page{display:none;animation:rise .34s cubic-bezier(.22,1,.36,1)}
+.page.active{display:block}
+@keyframes rise{from{opacity:0;transform:translateY(9px)}
+  to{opacity:1;transform:none}}
+
+/* ---------- 卡片 ---------- */
+.card{
+  background:var(--card);border-radius:var(--radius);
+  padding:20px 22px;box-shadow:var(--shadow);margin-bottom:16px;
+}
+.card-title{font-size:14.5px;font-weight:700;letter-spacing:.1px}
+.card-sub{font-size:12px;color:var(--muted);margin-top:5px}
+.page-title{font-size:21px;font-weight:700;letter-spacing:.2px;
+  padding:2px 2px 15px}
+
+/* ---------- 表单 ---------- */
+.field{margin-top:16px}
+.label{font-size:12px;color:var(--muted);margin-bottom:7px;
+  font-weight:600}
+.input{
+  width:100%;padding:9px 13px;border-radius:var(--radius-sm);
+  border:.5px solid var(--border);background:var(--card);
+  color:var(--text);outline:none;transition:border-color .2s,box-shadow .2s;
+  font-size:13px;
+}
+.input:focus{border-color:var(--primary);
+  box-shadow:0 0 0 3.5px var(--primary-50)}
+.input::placeholder{color:var(--muted2)}
+.row{display:flex;gap:12px;align-items:center}
+
+/* ---------- 分段控件 ---------- */
+.seg{display:inline-flex;background:var(--secondary);padding:2.5px;
+  border-radius:11px;gap:2px}
+.seg button{
+  padding:6px 15px;border-radius:9px;font-size:12.5px;font-weight:500;
+  color:var(--muted);transition:all .2s cubic-bezier(.22,1,.36,1);
+}
+.seg button.active{
+  background:var(--card);color:var(--text);font-weight:600;
+  box-shadow:0 1px 3px rgba(0,0,0,.09);
+}
+
+/* ---------- 按钮 ---------- */
+.btn{
+  padding:8px 17px;border-radius:var(--radius-sm);font-size:12.5px;
+  font-weight:600;transition:all .18s cubic-bezier(.22,1,.36,1);
+  white-space:nowrap;
+}
+.btn-primary{background:var(--primary);color:#fff;
+  box-shadow:0 1px 2px rgba(0,122,255,.28),0 4px 12px rgba(0,122,255,.2)}
+.btn-primary:hover{background:var(--primary-dark);transform:translateY(-1px);
+  box-shadow:0 2px 4px rgba(0,122,255,.32),0 7px 18px rgba(0,122,255,.26)}
+.btn-ghost{background:var(--secondary);color:var(--text)}
+.btn-ghost:hover{background:#e8e8ed;transform:translateY(-1px)}
+.btn-danger{background:var(--danger-50);color:var(--danger)}
+.btn-danger:hover{background:#ffdcd9;transform:translateY(-1px)}
+.btn:active{transform:translateY(0) scale(.98)}
+.btn:disabled{opacity:.42;cursor:not-allowed;transform:none!important}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+/* ---------- 开关 ---------- */
+.switch{width:47px;height:28px;border-radius:14px;background:#e5e5ea;
+  position:relative;transition:background .26s cubic-bezier(.22,1,.36,1);
+  flex:none}
+.switch::after{
+  content:"";position:absolute;top:2px;left:2px;width:24px;height:24px;
+  border-radius:50%;background:#fff;
+  box-shadow:0 2px 5px rgba(0,0,0,.18),0 1px 2px rgba(0,0,0,.1);
+  transition:transform .26s cubic-bezier(.22,1,.36,1);
+}
+.switch.on{background:var(--success)}
+.switch.on::after{transform:translateX(19px)}
+
+/* ---------- 状态项 ---------- */
+.stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px 22px}
+.stat-label{font-size:11.5px;color:var(--muted);font-weight:500}
+.stat-value{font-size:14.5px;font-weight:650;margin-top:5px;
+  letter-spacing:.1px}
+.stat-value.ok{color:var(--success)}
+.stat-value.err{color:var(--danger)}
+.stat-value.warn{color:var(--warn)}
+.daemon-line{display:flex;align-items:center;gap:9px;font-size:13px;
+  font-weight:600;margin-top:4px}
+.ds.run{color:var(--success)}
+.ds.stop{color:var(--muted)}
+.hint{font-size:11px;color:var(--muted)}
+
+/* ---------- 程序维护 / 部署提示 ---------- */
+.deploy-banner{
+  display:none;align-items:flex-start;gap:12px;
+  background:#fff7e6;border:1px solid rgba(255,159,39,.45);
+  color:#7a4d0b;border-radius:var(--radius-md);padding:10px 14px;
+  font-size:12px;line-height:1.65;margin-bottom:16px;
+}
+/* 状态警示条：守护异常 / 登录失败提示（复用部署横幅视觉） */
+.warn-bar{
+  display:flex;align-items:center;gap:12px;
+  background:#fff7e6;border:1px solid rgba(255,159,39,.45);
+  color:#7a4d0b;border-radius:var(--radius-md);padding:10px 14px;
+  font-size:12px;line-height:1.6;
+}
+.warn-bar.err{
+  background:#fff0f0;border-color:rgba(255,59,48,.4);color:#a33;
+}
+/* 提示型（蓝）：守护版本自愈等"已自动处理"的状态，不需要用户救火 */
+.warn-bar.info{
+  background:var(--primary-50);border-color:rgba(0,122,255,.32);color:#0b4a8f;
+}
+/* 最近状态事件条：掉线/重连/恢复/登录结果即时展示 */
+.evt-bar{
+  display:flex;flex-direction:column;gap:4px;
+  background:#f6f7f9;border:1px solid var(--border);
+  border-radius:var(--radius-md);padding:8px 12px;
+  font-size:12px;line-height:1.55;
+}
+.evt-bar .evt-cap{font-size:11px;color:var(--muted);font-weight:600}
+.evt-item{display:flex;align-items:center;gap:8px;color:#444;white-space:nowrap}
+.evt-item b{width:14px;height:14px;border-radius:50%;flex-shrink:0;
+  display:inline-flex;align-items:center;justify-content:center;
+  font-size:9px;color:#fff;background:#bbb}
+.evt-item.ok b{background:#34c759}
+.evt-item.err b{background:#ff3b30}
+.evt-item.warn b{background:#ff9500}
+.evt-item i{font-style:normal;font-size:10px;color:var(--muted);margin-left:auto;flex-shrink:0}
+.deploy-banner b{font-weight:700}
+.comp-row{
+  display:flex;align-items:center;gap:10px;padding:11px 2px;
+  border-bottom:1px solid var(--border);
+}
+.comp-row:last-child{border-bottom:none}
+.comp-info{flex:1;min-width:0}
+.comp-name{font-size:13px;font-weight:650}
+.comp-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.5}
+.comp-state{
+  font-size:11.5px;font-weight:600;flex:none;padding:3px 9px;
+  border-radius:20px;background:var(--secondary);color:var(--muted);
+  white-space:nowrap;
+}
+.comp-state.ok{background:#e3f6e8;color:var(--success)}
+.comp-state.warn{background:#fff3d6;color:var(--warn)}
+
+/* ---------- 日志 ---------- */
+.log{
+  background:#1c1c1e;color:#e8e8ed;border-radius:var(--radius-md);
+  padding:14px 16px;font-family:"SF Mono",Menlo,Consolas,monospace;
+  font-size:11px;line-height:1.65;height:250px;overflow-y:auto;
+  white-space:pre-wrap;word-break:break-all;margin-top:14px;
+}
+.log::-webkit-scrollbar{width:8px}
+.log::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);
+  border-radius:8px}
+
+/* ---------- 自绘确认对话框 ---------- */
+.modal-mask{
+  position:fixed;inset:0;background:rgba(0,0,0,.30);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  z-index:998;display:none;align-items:center;justify-content:center;
+  animation:fadeIn .22s ease;
+}
+.modal-mask.show{display:flex}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal{
+  width:400px;max-width:calc(100vw - 48px);
+  background:rgba(255,255,255,.95);
+  backdrop-filter:blur(30px) saturate(180%);
+  -webkit-backdrop-filter:blur(30px) saturate(180%);
+  border-radius:20px;box-shadow:var(--shadow-lg);
+  padding:24px 26px 20px;
+  animation:pop .3s cubic-bezier(.22,1,.36,1);
+}
+@keyframes pop{from{opacity:0;transform:scale(.94) translateY(8px)}
+  to{opacity:1;transform:none}}
+.modal-title{font-size:16px;font-weight:700;letter-spacing:.2px}
+.modal-body{font-size:13px;color:var(--muted);line-height:1.75;margin-top:12px}
+.modal-body b{color:var(--danger);font-weight:700}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
+.modal-actions .btn{min-width:88px}
+
+/* ---------- 气泡通知 ---------- */
+.toast{
+  position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(80px);
+  background:rgba(28,28,30,.94);
+  backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+  color:#fff;padding:12px 20px;border-radius:14px;font-size:12.5px;
+  box-shadow:var(--shadow-lg);opacity:0;pointer-events:none;
+  transition:all .38s cubic-bezier(.22,1,.36,1);z-index:999;
+  max-width:460px;line-height:1.5;
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ---------- 加载遮罩 ---------- */
+.spin{
+  width:13px;height:13px;border:2px solid rgba(255,255,255,.3);
+  border-top-color:#fff;border-radius:50%;display:inline-block;
+  animation:spin .7s linear infinite;vertical-align:-2px;margin-right:6px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div class="titlebar drag-region" id="titlebar">
+  <div class="tb-brand">
+    <span class="tb-dot"></span>
+    <span class="tb-title">CampusNetAuth</span>
+    <span class="tb-sub">校园网无感认证</span>
+  </div>
+  <div class="tb-btns">
+    <button class="tb-btn tb-min" id="btnMin" title="最小化"></button>
+    <button class="tb-btn tb-max" id="btnMax" title="最大化"></button>
+    <button class="tb-btn tb-close" id="btnClose" title="关闭"></button>
+  </div>
+</div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="side-head">
+      <div class="side-logo">CampusNet</div>
+      <div class="side-logo-sub">校园网无感认证</div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" data-page="conn">
+        <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+          <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>
+        </svg>连接与账号
+      </button>
+      <button class="nav-item" data-page="auto">
+        <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+        </svg>自动化
+      </button>
+      <button class="nav-item" data-page="status">
+        <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+        </svg>状态与日志
+      </button>
+    </nav>
+    <div class="side-foot">密码使用 Windows DPAPI 加密<br>仅当前 Windows 用户可解密</div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div class="topbar-sub" id="subtitle">正在读取状态…</div>
+      <div class="state">
+        <span class="dot" id="dot"></span>
+        <span id="stateText">—</span>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="deploy-banner" id="deployBanner">
+        <span>检测到当前目录<b>不是空文件夹</b>：建议将 exe 单独放入一个空文件夹运行，程序会在同目录生成配置与状态文件（本提示仅在全新部署时出现）。</span>
+        <button class="btn btn-ghost" id="deployBannerClose" style="flex-shrink:0">知道了</button>
+      </div>
+      <!-- 连接与账号 -->
+      <section class="page active" id="page-conn">
+        <div class="page-title">校园网自动认证</div>
+        <div class="card">
+          <div class="card-title">认证信息</div>
+          <div class="card-sub">修改后点击「保存并连接」立即生效并尝试认证</div>
+          <div class="field">
+            <div class="label">门户地址</div>
+            <input class="input" id="inHost" placeholder="172.16.54.18:80">
+          </div>
+          <div class="field">
+            <div class="label">运营商</div>
+            <div class="seg" id="segService">
+              <button data-v="default">校园网</button>
+              <button data-v="DX">电信</button>
+              <button data-v="YD">移动</button>
+              <button data-v="LT">联通</button>
+              <button data-v="auto">自动</button>
+            </div>
+          </div>
+          <div class="field">
+            <div class="label">账号（学号）</div>
+            <input class="input" id="inUser" placeholder="请输入学号">
+          </div>
+          <div class="field">
+            <div class="label">密码</div>
+            <input class="input" id="inPass" type="password"
+                   placeholder="留空表示不修改（Windows DPAPI 加密保存）">
+          </div>
+          <div class="btn-row" style="margin-top:20px">
+            <button class="btn btn-primary" id="btnConnect">保存并连接</button>
+            <button class="btn btn-danger" id="btnLogout">下线</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 自动化 -->
+      <section class="page" id="page-auto">
+        <div class="card">
+          <div class="card-title">工具箱</div>
+          <div class="card-sub">一键自检 · 体检 · 自启管理 · 抓取诊断 · 通知测试（原 .bat 已全部内置）</div>
+          <div class="btn-row" style="margin-top:16px">
+            <button class="btn btn-primary" id="btnSelfTest">自检</button>
+            <button class="btn btn-primary" id="btnHealth">一键体检</button>
+            <button class="btn btn-ghost" id="btnOpenDir">打开目录</button>
+          </div>
+          <div class="btn-row" style="margin-top:10px">
+            <button class="btn btn-ghost" id="btnDiagnose">抓取诊断</button>
+            <button class="btn btn-ghost" id="btnNotifyTest">通知测试</button>
+            <span class="hint">登录 Windows 即自动守护，全程无窗口</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">后台守护</div>
+          <div class="card-sub">仅当处于校园网且检测到未认证时才自动登录</div>
+          <div class="daemon-line" style="margin-top:14px">
+            <span id="daemonState">○ 已停止</span>
+          </div>
+          <div class="hint" id="daemonCompHint" style="margin-top:6px"></div>
+          <div class="hint" style="margin-top:4px">
+            升级提示：守护运行时程序文件被系统锁定，手动替换会失败——
+            把新版本文件放进本目录后用上方「立即升级」即可（会自动停守护并换文件）
+          </div>
+          <div class="warn-bar" id="daemonWarn" style="display:none;margin-top:10px">
+            <span>开机自启已启用，但守护未在运行</span>
+            <button class="btn btn-primary" id="btnDStart2" style="flex-shrink:0;margin-left:auto">立即启动</button>
+          </div>
+          <!-- 守护版本陈旧：换 exe 后老守护仍在跑旧代码，新功能不会生效 -->
+          <div class="warn-bar info" id="daemonStaleWarn"
+               style="display:none;margin-top:10px">
+            <span id="daemonStaleText"></span>
+            <button class="btn btn-primary" id="btnDRefresh"
+                    style="flex-shrink:0;margin-left:auto">重启守护以生效</button>
+          </div>
+          <!-- 程序目录里发现了更高版本的 exe -->
+          <div class="warn-bar" id="upgradeWarn"
+               style="display:none;margin-top:10px">
+            <span id="upgradeText"></span>
+            <button class="btn btn-primary" id="btnUpgrade"
+                    style="flex-shrink:0;margin-left:auto">立即升级</button>
+          </div>
+          <!-- GitHub 上有更新版本：只提示并打开发布页，不自动下载替换 -->
+          <div class="warn-bar info" id="remoteUpdateWarn"
+               style="display:none;margin-top:10px">
+            <span id="remoteUpdateText"></span>
+            <button class="btn btn-primary" id="btnOpenRelease2"
+                    style="flex-shrink:0;margin-left:auto">打开发布页</button>
+          </div>
+          <div class="warn-bar err" id="loginErrWarn" style="display:none;margin-top:10px"></div>
+          <div class="warn-bar err" id="autostartWarn" style="display:none;margin-top:10px"></div>
+          <div class="evt-bar" id="evtBar" style="display:none;margin-top:10px"></div>
+          <div class="btn-row" style="margin-top:14px">
+            <button class="btn btn-primary" id="btnDStart">启动守护</button>
+            <button class="btn btn-ghost" id="btnDStop">停止守护</button>
+            <button class="btn btn-ghost" id="btnDRestart">重启守护</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">自动认证</div>
+          <div class="row" style="margin-top:16px;justify-content:space-between">
+            <div>
+              <div style="font-size:13px;font-weight:600">开机后自动认证</div>
+              <div class="card-sub" style="margin-top:4px">写入开机自启并拉起后台守护，由同一个 exe 完成</div>
+            </div>
+            <div class="switch" id="swAuto"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">系统代理守卫</div>
+          <div class="card-sub">
+            开机前若开着代理（梯子），开机后系统代理仍是开着的状态——节点在未认证的
+            校园网里连不上，就会"什么网页都打不开"。开启后：检测到系统代理先自动关闭，
+            再走认证。
+          </div>
+          <div class="row" style="margin-top:16px;justify-content:space-between">
+            <div>
+              <div style="font-size:13px;font-weight:600">认证前自动关闭系统代理</div>
+              <div class="card-sub" style="margin-top:4px">
+                只关 Windows 系统代理与 PAC，不结束代理软件进程；认证成功后不自动恢复
+              </div>
+            </div>
+            <div class="switch" id="swProxyGuard"></div>
+          </div>
+          <div class="comp-row" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+            <div class="comp-info">
+              <div class="comp-name">当前系统代理</div>
+              <div class="comp-sub" id="proxyDetail">—</div>
+            </div>
+            <span class="comp-state" id="proxyState">—</span>
+          </div>
+          <div class="btn-row" style="margin-top:12px">
+            <button class="btn btn-ghost" id="btnProxyOff">立即关闭代理</button>
+            <button class="btn btn-ghost" id="btnProxyRestore">恢复关闭前的设置</button>
+            <span class="hint" id="proxyBackupHint"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">程序维护</div>
+          <div class="card-sub">自启、守护、界面由同一个 exe 承担，无需安装额外组件</div>
+          <div class="comp-row">
+            <div class="comp-info">
+              <div class="comp-name">一体化后台服务</div>
+              <div class="comp-sub">开机自启直接运行本程序 · 守护进程即同一个 exe</div>
+            </div>
+            <span class="comp-state" id="serviceState">—</span>
+          </div>
+          <div class="comp-row">
+            <div class="comp-info">
+              <div class="comp-name">版本更新</div>
+              <div class="comp-sub" id="updateSub">自动检查 GitHub Release（只检查，不下载）</div>
+            </div>
+            <span class="comp-state" id="updateState">—</span>
+            <button class="btn btn-ghost" id="btnUpdateCheck" style="flex-shrink:0">检查更新</button>
+            <button class="btn btn-primary" id="btnUpdateInstall" style="flex-shrink:0;display:none">下载并升级</button>
+            <button class="btn btn-ghost" id="btnOpenRelease" style="flex-shrink:0;display:none">打开发布页</button>
+          </div>
+          <div class="comp-row">
+            <div class="comp-info">
+              <div class="comp-name">彻底卸载本程序</div>
+              <div class="comp-sub">打开同目录的 <b id="uninsName">CampusNetAuthUninstall.exe</b>：停守护 → 删自启 → 清空本目录全部产物与缓存</div>
+            </div>
+            <span class="comp-state" id="compUninsState">—</span>
+            <button class="btn btn-danger" id="btnPurge" style="flex-shrink:0">彻底卸载</button>
+          </div>
+          <div class="hint" style="margin-top:12px">config.json / cred.bin 等配置数据首次运行自动生成；旧版残留的 Daemon.vbs / UI.vbs 会在彻底卸载时一并清理</div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">检测参数</div>
+          <div class="card-sub">留空则保持原值</div>
+          <div class="field"><div class="label">在线检测周期（秒）</div>
+            <input class="input" id="inInterval" style="max-width:160px"></div>
+          <div class="field"><div class="label">离线检测周期（秒）</div>
+            <input class="input" id="inOffline" style="max-width:160px"></div>
+          <div class="field"><div class="label">失败重试间隔（秒）</div>
+            <input class="input" id="inRetry" style="max-width:160px"></div>
+          <div class="field"><div class="label">最长退避间隔（秒）</div>
+            <input class="input" id="inMax" style="max-width:160px"></div>
+          <div class="field"><div class="label">单次请求超时（秒）</div>
+            <input class="input" id="inTimeout" style="max-width:160px"></div>
+          <div class="btn-row" style="margin-top:18px">
+            <button class="btn btn-primary" id="btnSaveAuto">保存设置</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 状态与日志 -->
+      <section class="page" id="page-status">
+        <div class="card">
+          <div class="card-title">当前状态</div>
+          <div class="stat-grid" style="margin-top:16px">
+            <div><div class="stat-label">网络状态</div>
+              <div class="stat-value" id="stNet">—</div></div>
+            <div><div class="stat-label">账号</div>
+              <div class="stat-value" id="stUser">—</div></div>
+            <div><div class="stat-label">服务</div>
+              <div class="stat-value" id="stSvc">—</div></div>
+            <div><div class="stat-label">IP 地址</div>
+              <div class="stat-value" id="stIp">—</div></div>
+            <div><div class="stat-label">开机自启</div>
+              <div class="stat-value" id="stAuto">—</div></div>
+            <div><div class="stat-label">后台守护</div>
+              <div class="stat-value" id="stDaemon">—</div></div>
+          </div>
+          <div class="btn-row" style="margin-top:20px">
+            <button class="btn btn-ghost" id="btnRefresh">刷新</button>
+            <button class="btn btn-primary" id="btnCheck">立即检测</button>
+            <button class="btn btn-danger" id="btnLogout2">下线</button>
+          </div>
+          <div class="hint" style="margin-top:10px">立即检测 = 检查当前在线状态，若未认证将自动登录</div>
+        </div>
+        <div class="card">
+          <div class="card-title">运行日志</div>
+          <div class="log" id="logBox">（载入中…）</div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-mask" id="modalMask">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-title" id="modalTitle">确认操作</div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modalCancel">取消</button>
+      <button class="btn btn-primary" id="modalOk">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="outputMask">
+  <div class="modal" role="dialog" aria-modal="true" style="width:660px;max-width:calc(100vw - 40px)">
+    <div class="modal-title" id="outputTitle">任务输出</div>
+    <pre class="log" id="outputBox" style="height:340px;margin-top:12px;white-space:pre-wrap"></pre>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="outputClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+// 会话令牌：serve() 每次启动随机生成并拼在页面 URL（?token=）上；
+// 所有 /api/* 请求必须带 X-CNA-Token 头，否则后端 403。
+// 防本机其它进程/恶意网页越权调用管理接口（详见后端 _gate）。
+const CNA_TOKEN = new URLSearchParams(location.search).get('token') || '';
+const api = (p, opt) => {
+  opt = opt || {};
+  opt.headers = Object.assign({}, opt.headers, {'X-CNA-Token': CNA_TOKEN});
+  return fetch(p, opt).then(r => r.json());
+};
+const post = (p, body) => api(p, {method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body: JSON.stringify(body || {})});
+// unix 秒时间戳 -> "HH:MM"（用于登录失败提示）
+const fmtClock = (ts) => {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes());
+};
+// unix 秒时间戳 -> "MM-DD HH:MM"（用于"上次检查更新"时间）
+const fmtStamp = (ts) => {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes());
+};
+
+let toastTimer = null;
+// 最近一次 /api/status 的原始结果：按钮回调（如升级确认框）要用到其中的
+// 候选版本信息，而 load() 里是局部变量，故额外存一份。
+let lastSt = {};
+// HTML 转义（事件/路径等外部文本进 innerHTML 前一律过一道）
+const esc = (s) => String(s == null ? '' : s).replace(/[<>&"']/g,
+  c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+// 门户认证异常自愈事件的"已提醒"时间戳：同一条事件只弹一次界面气泡，
+// 避免守护持续探测期间重复弹窗
+let lastFixToastT = 0;
+function toast(msg, ms){
+  const el = $('#toast');
+  // 安全：msg 可能包含门户/服务端返回的字符串（如认证失败原因），
+  // 必须用 textContent，绝不走 innerHTML（防 XSS 注入管理界面）
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), ms || 3000);
+}
+
+/* ---------- 自绘确认对话框（替代原生 confirm）---------- */
+function confirmDialog({title, html, okText, onOk}){
+  const mask = $('#modalMask');
+  $('#modalTitle').textContent = title || '确认操作';
+  $('#modalBody').innerHTML = html || '';
+  $('#modalOk').textContent = okText || '确认';
+  mask.classList.add('show');
+  const close = () => mask.classList.remove('show');
+  $('#modalCancel').onclick = close;
+  $('#modalOk').onclick = () => { close(); onOk && onOk(); };
+  mask.onclick = (e) => { if (e.target === mask) close(); };
+  $('#modalCancel').focus();
+}
+
+/* ---------- 任务输出对话框（自检/体检结果；textContent 纯文本防注入）---------- */
+function outputDialog(title, text){
+  $('#outputTitle').textContent = title;
+  $('#outputBox').textContent = text;
+  const mask = $('#outputMask');
+  mask.classList.add('show');
+  $('#outputClose').onclick = () => mask.classList.remove('show');
+  mask.onclick = (e) => { if (e.target === mask) mask.classList.remove('show'); };
+}
+
+/* ---------- 窗口控制：优先 pywebview js_api，回退 HTTP ---------- */
+async function win(action){
+  try{
+    if (window.pywebview && window.pywebview.api){
+      const a = window.pywebview.api;
+      if (action === 'minimize' && a.win_minimize) return a.win_minimize();
+      if (action === 'maximize' && a.win_maximize_toggle) return a.win_maximize_toggle();
+      if (action === 'close' && a.win_close) return a.win_close();
+    }
+  }catch(e){}
+  return post('/api/window', {action});
+}
+$('#btnMin').onclick = () => win('minimize');
+$('#btnMax').onclick = () => win('maximize');
+$('#btnClose').onclick = () => win('close');
+
+/* ---------- 标题栏拖动（pywebview drag-region 官方通道）---------- */
+// DIRECT_TARGET_ONLY=True：只有 target 本身是 .drag-region 才触发拖动 →
+// 把品牌区及其子元素（logo 点 / 标题 / 副标题）全部补上 .drag-region，
+// 整条标题栏（除交通灯按钮区）都可拖；按钮无此 class 且已 stopPropagation。
+document.querySelectorAll('#titlebar .tb-brand, #titlebar .tb-brand *')
+  .forEach(el => el.classList.add('drag-region'));
+// 交通灯按钮阻止 mousedown 冒泡：避免被 .titlebar.drag-region 的拖动劫持成"拖动"
+document.querySelectorAll('.tb-btn').forEach(b => {
+  b.addEventListener('mousedown', e => e.stopPropagation());
+});
+// 双击标题栏（非按钮区）切换最大化
+$('#titlebar').addEventListener('dblclick', (e) => {
+  if (e.target.closest('.tb-btns')) return;
+  win('maximize');
+});
+
+/* ---------- 页面切换 ---------- */
+document.querySelectorAll('.nav-item').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('#page-' + btn.dataset.page).classList.add('active');
+    $('.content').scrollTop = 0;
+  };
+});
+
+/* ---------- 分段控件 ---------- */
+let curService = 'default';
+$('#segService').querySelectorAll('button').forEach(b => {
+  b.onclick = () => {
+    curService = b.dataset.v;
+    $('#segService').querySelectorAll('button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+  };
+});
+function setService(v){
+  curService = v || 'default';
+  $('#segService').querySelectorAll('button').forEach(x =>
+    x.classList.toggle('active', x.dataset.v === curService));
+}
+
+/* ---------- 开关 ---------- */
+let swAutoVal = false;
+let swProxyGuardVal = true;   // true = proxy_guard 为 auto
+let deployBannerDone = false;
+$('#swAuto').onclick = async () => {
+  const want = !swAutoVal;
+  const r = want ? await post('/api/autostart/install')
+                 : await post('/api/autostart/uninstall');
+  if (r && r.ok){
+    toast(r.message || (want ? '已开启开机自启' : '已关闭开机自启'), 3600);
+    load();
+  } else toast((r && r.message) || '操作失败', 3200);
+};
+
+/* 系统代理守卫开关：只是改 config.json 的 proxy_guard，不动注册表 */
+$('#swProxyGuard').onclick = async () => {
+  const want = !swProxyGuardVal;
+  const r = await post('/api/config', {proxy_guard: want ? 'auto' : 'off'});
+  if (r && r.ok){
+    toast(want ? '已开启代理守卫：认证前会自动关闭系统代理'
+               : '已关闭代理守卫：程序不再碰你的代理设置');
+    load();
+  } else toast('保存失败', 3200);
+};
+$('#btnProxyOff').onclick = async () => {
+  const r = await post('/api/proxy/off', {});
+  if (r && r.ok){
+    toast(r.changed ? '系统代理已关闭' : '当前没有开启的系统代理，无需处理');
+    load();
+  } else toast('关闭失败，详见日志', 3600);
+};
+$('#btnProxyRestore').onclick = async () => {
+  const r = await post('/api/proxy/restore', {});
+  toast(r && r.ok ? '已恢复关闭前的代理设置'
+                  : (r && r.message) || '没有可恢复的代理设置', 3600);
+  load();
+};
+
+/* ---------- 状态刷新 ---------- */
+async function load(){
+  let st;
+  try { st = await api('/api/status'); }
+  catch(e){ $('#stateText').textContent = '服务未响应'; return; }
+  lastSt = st;
+
+  const online = st.online;
+  const dot = $('#dot');
+  dot.className = 'dot live';
+  const netTxt = $('#stateText');
+  netTxt.className = '';
+  if (online === true){ netTxt.textContent = '已连接'; dot.classList.add('green'); netTxt.classList.add('ok'); }
+  else if (online === null){
+    /* 探测无结论 ≠ 网络不可达：门户可达时如实说明，避免误报（issue #1） */
+    netTxt.textContent = st.net_text || (st.portal ? '门户可达 · 探测无结论' : '不在校园网');
+    dot.classList.add('orange'); netTxt.classList.add('warn'); }
+  else { netTxt.textContent = '未认证'; dot.classList.add('red'); netTxt.classList.add('err'); }
+
+  $('#subtitle').textContent = '门户 ' + st.host + ' · 检测周期 ' + st.interval + ' 秒';
+  const netMap = {true:['已认证','ok'], false:['未认证','err'],
+                  null:[(st.portal ? '待确认' : '不可达'),'warn']};
+  const nm = netMap[online] || ['—',''];
+  const stNetEl = $('#stNet');
+  stNetEl.textContent = nm[0];
+  stNetEl.className = 'stat-value ' + nm[1];
+  $('#stUser').textContent = st.username ? st.username : '—';
+  $('#stSvc').textContent = (st.info && st.info.service) || st.service || '—';
+  $('#stIp').textContent = (st.info && st.info.userIp) || '—';
+  $('#stAuto').textContent = st.autostart ? '已启用' : '未启用';
+
+  /* ---- 系统代理守卫 ---- */
+  swProxyGuardVal = (st.proxy_guard !== 'off');
+  $('#swProxyGuard').classList.toggle('on', swProxyGuardVal);
+  const px = st.proxy || {};
+  const pxStateEl = $('#proxyState');
+  pxStateEl.textContent = px.active ? '已开启' : '未开启';
+  pxStateEl.className = 'comp-state ' + (px.active ? 'warn' : 'ok');
+  $('#proxyDetail').textContent = px.detail || '—';
+  // 有备份才能恢复；按钮状态跟着走，避免点了没反应
+  const pb = st.proxy_backup;
+  $('#btnProxyRestore').disabled = !pb;
+  $('#proxyBackupHint').textContent = pb
+    ? ('已记录 ' + (pb.t || '') + ' 关闭前的设置，可一键恢复')
+    : (px.active ? '关闭前会自动备份原设置' : '');
+
+  const stD = $('#stDaemon');
+  stD.textContent = st.daemon ? '运行中' : '已停止';
+  stD.className = 'stat-value ' + (st.daemon ? 'ok' : '');
+  const ds = $('#daemonState');
+  ds.textContent = st.daemon
+    ? ('● 运行中 (PID ' + st.daemon_pid + ')'
+       + (st.daemon_version ? ' · v' + st.daemon_version : ''))
+    : '○ 已停止';
+  ds.className = st.daemon ? 'ds run' : 'ds stop';
+  // 守护版本与程序版本不一致时，行内也标一下（配合上方蓝色提示条）
+  if (st.daemon && st.daemon_version && st.daemon_version !== st.app_version){
+    ds.textContent += ' ← 旧版';
+  }
+
+  swAutoVal = !!st.autostart;
+  $('#swAuto').classList.toggle('on', swAutoVal);
+
+  // 一体化服务状态（自启 + 守护都来自同一个 exe，没有"组件"概念）
+  const svcEl = $('#serviceState');
+  if (st.autostart && st.daemon){
+    svcEl.textContent = '运行中'; svcEl.className = 'comp-state ok';
+  } else if (st.autostart){
+    svcEl.textContent = '自启已开'; svcEl.className = 'comp-state warn';
+  } else {
+    svcEl.textContent = '仅当前会话'; svcEl.className = 'comp-state';
+  }
+
+  // 远程版本检查（只读状态缓存；实际请求由启动后自动检查 / 在线自动补查 / 按钮触发）
+  const upd = st.update || {};
+  const upState = $('#updateState');
+  const updWhen = upd.checked_at ? fmtStamp(upd.checked_at) : '';
+  upState.title = upd.error ? ('上次检查失败：' + upd.error) : '';
+  if (!upd.ok && upd.checked_at){
+    // 失败原因写进副标题：只写"检查失败"时用户无从判断是没网、限流还是别的问题
+    const reason = String(upd.error || '网络不可用').split('\n')[0].slice(0, 60);
+    $('#updateSub').textContent = '当前 v' + (st.app_version || '')
+      + ' · 上次检查 ' + updWhen + ' 失败：' + reason;
+  } else {
+    $('#updateSub').textContent = '当前 v' + (st.app_version || '')
+      + (updWhen ? ' · 上次检查 ' + updWhen : '')
+      + ' · 自动检查 GitHub Release（可一键下载升级）';
+  }
+  if (upd.available){
+    upState.textContent = 'v' + upd.latest + ' 可用';
+    upState.className = 'comp-state warn';
+    $('#btnUpdateInstall').style.display = '';
+    $('#btnOpenRelease').style.display = '';
+  } else {
+    $('#btnUpdateInstall').style.display = 'none';
+    $('#btnOpenRelease').style.display = 'none';
+    if (upd.ok){ upState.textContent = '已是最新'; upState.className = 'comp-state ok'; }
+    else if (upd.checked_at){ upState.textContent = '检查失败'; upState.className = 'comp-state warn'; }
+    else { upState.textContent = '待检查'; upState.className = 'comp-state'; }
+  }
+
+  // 卸载器（主 exe 打开时自动释放到同目录；它是唯一能删掉主 exe 的东西）
+  const cUn = $('#compUninsState');
+  if (st.uninstaller) {
+    cUn.textContent = '已就绪'; cUn.className = 'comp-state ok';
+    $('#btnPurge').disabled = false;
+  } else {
+    cUn.textContent = '未释放'; cUn.className = 'comp-state warn';
+    $('#btnPurge').disabled = true;
+    cUn.title = '内置卸载器未释放：可能构建时没打入，请重新构建或重新下载';
+  }
+
+  // 守护即当前 exe 的后台进程：无需任何前置组件，随时可启停
+  $('#btnDStart').disabled = !!st.daemon;
+  $('#btnDStop').disabled = !st.daemon;
+  $('#btnDRestart').disabled = !st.daemon;
+  $('#daemonCompHint').textContent = st.daemon
+    ? '守护以同一个 exe 在后台运行（开机自启也直接指向它）'
+    : '守护未运行：点「启动守护」即可，无需安装组件';
+
+  // 自启已启用但守护未运行 → 警示 + 一键启动（守护异常自愈提示）
+  $('#daemonWarn').style.display =
+    (!!st.autostart && !st.daemon) ? 'flex' : 'none';
+  // 自启链路健康（Run 键→启动器→exe 文件完整性）：异常时红色警示，
+  // 直接告知"开机自启将失败"的根因，避免下次开机弹 80070002
+  const ah = st.autostart_health || [];
+  const awEl = $('#autostartWarn');
+  if (st.autostart && ah.length >= 2 && !ah[0] && ah[1]) {
+    awEl.textContent = '⚠ ' + ah[1];
+    awEl.style.display = 'flex';
+  } else {
+    awEl.style.display = 'none';
+  }
+  // 守护版本陈旧：换 exe 后老守护仍跑旧代码（新功能不生效）。界面启动时
+  // 已尝试自动重启，这里兜底展示 + 提供一键"重启守护以生效"。
+  const dsEl = $('#daemonStaleWarn');
+  if (st.daemon && st.daemon_stale) {
+    $('#daemonStaleText').textContent = '后台守护仍是旧版本'
+      + (st.daemon_version ? ' v' + st.daemon_version : '')
+      + '（当前 v' + (st.app_version || '') + '），新功能尚未生效';
+    dsEl.style.display = 'flex';
+  } else {
+    dsEl.style.display = 'none';
+  }
+  // 程序目录里发现了更高版本的 exe（用户把下载的文件放进来即可，不必手动替换
+  // ——守护在跑时 exe 被系统锁住，手动替换会失败）
+  const upEl = $('#upgradeWarn');
+  if (st.upgrade && st.upgrade.version) {
+    $('#upgradeText').textContent = '发现新版本 v' + st.upgrade.version
+      + '（' + (st.upgrade.name || '') + '），可立即升级';
+    upEl.style.display = 'flex';
+  } else {
+    upEl.style.display = 'none';
+  }
+  // GitHub 上有更新版本（只提示，不自动下载；发布页由系统浏览器打开）
+  const ruEl = $('#remoteUpdateWarn');
+  if (upd.available){
+    $('#remoteUpdateText').textContent = 'GitHub 上有新版本 v' + upd.latest
+      + (upd.name ? '（' + upd.name + '）' : '') + '，可前往发布页下载';
+    ruEl.style.display = 'flex';
+  } else {
+    ruEl.style.display = 'none';
+  }
+  // 守护最近一次致命登录失败（last_error，成功后自动清除）
+  const leEl = $('#loginErrWarn');
+  if (st.last_error && st.last_error.msg) {
+    leEl.textContent = '⚠ 守护登录失败：' + st.last_error.msg
+      + (st.last_error.t ? '（' + fmtClock(st.last_error.t) + '）' : '');
+    leEl.style.display = 'flex';
+  } else {
+    leEl.style.display = 'none';
+  }
+  // 最近状态事件（掉线/重连/恢复/登录结果/门户异常自愈）即时展示，最多 3 条
+  const evtEl = $('#evtBar');
+  const evts = st.events || [];
+  if (evts.length){
+    const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
+                     login_ok:'ok', login_fail:'err', kickout:'warn',
+                     blocked:'err', proxy:'warn',
+                     portal_fix:'warn', daemon_refresh:'warn', upgrade:'ok'};
+    const EVT_MARK = {err:'✕', portal_fix:'⚠', daemon_refresh:'↻', upgrade:'↑'};
+    const items = evts.slice(-3).reverse().map(ev => {
+      const d = new Date(ev.t * 1000);
+      const ts = String(d.getHours()).padStart(2,'0') + ':' +
+                 String(d.getMinutes()).padStart(2,'0');
+      const msg = String(ev.msg || '').replace(/[<>&"']/g,
+        c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+      return '<span class="evt-item ' + (EVT_CLS[ev.kind] || '') + '">'
+        + '<b>' + (EVT_MARK[EVT_CLS[ev.kind]] || '✓') + '</b>'
+        + msg + '<i>' + ts + '</i></span>';
+    }).join('');
+    evtEl.innerHTML = '<span class="evt-cap">最近动态</span>' + items;
+    evtEl.style.display = 'flex';
+    // 门户认证异常自愈（守护自动下线重登）：同步弹一次界面气泡，
+    // 与系统右下角通知形成双通道；按事件时间戳去重，只弹一次
+    const fixes = evts.filter(e => e.kind === 'portal_fix');
+    const lastFix = fixes.length ? fixes[fixes.length - 1] : null;
+    if (lastFix && lastFix.t > lastFixToastT){
+      lastFixToastT = lastFix.t;
+      toast('检测到门户认证异常，已自动退出并重新认证', 4500);
+    }
+  } else {
+    evtEl.style.display = 'none';
+  }
+
+  // 空文件夹部署提示（仅全新部署 + 目录有无关文件 + 未手动关闭）
+  const showBanner = !!st.first_deploy && (st.foreign_files || []).length > 0
+                     && !deployBannerDone;
+  $('#deployBanner').style.display = showBanner ? 'flex' : 'none';
+
+  // 表单回填
+  $('#inHost').value = st.host || '';
+  $('#inUser').value = st.username || '';
+  setService(st.service);
+  const c = st.cfg || {};
+  $('#inInterval').value = c.interval || '';
+  $('#inOffline').value = c.offline_interval || '';
+  $('#inRetry').value = c.retry_interval || '';
+  $('#inMax').value = c.max_interval || '';
+  $('#inTimeout').value = c.timeout || '';
+
+  // 日志
+  try{
+    const lg = await api('/api/log?n=200');
+    const box = $('#logBox');
+    box.textContent = lg.text || '（暂无日志）';
+    box.scrollTop = box.scrollHeight;
+  }catch(e){}
+}
+
+function busy(on, btn, text){
+  if (!btn) return;
+  if (on){ btn.dataset._t = btn.innerHTML; btn.innerHTML = '<span class="spin"></span>' + text; btn.disabled = true; }
+  else { btn.innerHTML = btn.dataset._t || btn.innerHTML; btn.disabled = false; }
+}
+
+async function withTask(url, btn, busyText, doneTitle){
+  busy(true, btn, busyText);
+  try{
+    const r = await post(url);
+    if (!r.id){ toast('启动失败'); busy(false, btn); return; }
+    const id = r.id;
+    for (let i = 0; i < 300; i++){
+      await new Promise(res => setTimeout(res, 1000));
+      const t = await api('/api/task?id=' + id);
+      if (t.status !== 'running'){
+        busy(false, btn);
+        const ok = t.status === 'done';
+        // 输出同时由后端写入 campusnet.log；这里直接弹窗展示完整结果
+        outputDialog(doneTitle + (ok ? ' · 完成' : ' · 失败'),
+                     (t.output && String(t.output).trim()) || '（无输出）');
+        load();
+        return;
+      }
+    }
+    busy(false, btn);
+    toast('任务超时');
+  }catch(e){ busy(false, btn); toast('出错：' + e); }
+}
+
+/* ---------- 事件绑定 ---------- */
+$('#btnConnect').onclick = async () => {
+  const btn = $('#btnConnect');
+  busy(true, btn, '正在连接…');
+  const r = await post('/api/connect', {
+    host: $('#inHost').value,
+    username: $('#inUser').value,
+    password: $('#inPass').value,
+    service: curService
+  });
+  busy(false, btn);
+  if (r.ok) toast(r.result === 'already_online' ? '当前已在线，无需重复认证' : '认证成功 ✓');
+  else toast('认证失败：' + (r.error || '未知错误') + (r.hint ? '（' + r.hint + '）' : ''), 4200);
+  $('#inPass').value = '';
+  load();
+};
+
+const doLogout = async () => {
+  const r = await post('/api/logout');
+  const m = Math.round(((r && r.pause) || 0) / 60);
+  toast(m > 0 ? (`已下线，${m} 分钟内不会自动重连（点「立即连接」可恢复）`) : '已下线');
+  load();
+};
+$('#btnLogout').onclick = doLogout;
+$('#btnLogout2').onclick = doLogout;
+$('#btnRefresh').onclick = () => load();
+$('#btnCheck').onclick = async () => {
+  const btn = $('#btnCheck');
+  busy(true, btn, '检测中…');
+  const r = await post('/api/connect', {});
+  busy(false, btn);
+  if (r.ok) toast(r.result === 'already_online' ? '已在线，无需重新认证 ✓' : '认证成功，已重新连接 ✓');
+  else toast('检测失败：' + (r.error || '未知错误') + (r.hint ? '（' + r.hint + '）' : ''), 4200);
+  load();
+};
+$('#btnDStart').onclick = async () => { await post('/api/daemon/start'); toast('守护已启动'); load(); };
+$('#btnDStart2').onclick = async () => { await post('/api/daemon/start'); toast('守护已启动'); load(); };
+$('#btnDStop').onclick = async () => { await post('/api/daemon/stop'); toast('守护已停止'); load(); };
+$('#btnDRestart').onclick = async () => { await post('/api/daemon/restart'); toast('守护已重启'); load(); };
+$('#btnOpenDir').onclick = () => post('/api/open-dir');
+$('#btnDiagnose').onclick = async () => {
+  await post('/api/diagnose');
+  toast('抓取诊断已在后台启动，报告将写入 probe/capture_result.json', 4600);
+};
+// 通知测试：三条通道一次测完
+//   ① 界面气泡（前端自己弹，就是下面这条）
+//   ② 界面进程的系统通知（后端本进程发）
+//   ③ 守护进程的系统通知（经控制通道让守护自己发，验证无人值守场景）
+$('#btnNotifyTest').onclick = async () => {
+  toast('通知测试 ① · 界面气泡：看到这条即正常', 3000);
+  let r;
+  try { r = await post('/api/notify-test'); }
+  catch(e){ toast('通知测试失败：' + e, 4200); return; }
+  const d = r.daemon_ok
+    ? '③ 守护通知 ✓'
+    : '③ 守护通知 ✗（' + (r.daemon_msg || '未知原因') + '）';
+  toast('通知测试：② 界面通知 ' + (r.ui_ok ? '✓' : '✗') + '　' + d
+        + '　请查看屏幕右下角', 7000);
+};
+// 守护版本自愈：把仍在跑旧代码的后台守护重启掉，让新功能立刻生效。
+// 界面启动时已自动尝试过一次，这里是手动兜底入口。
+$('#btnDRefresh').onclick = () =>
+  withTask('/api/daemon/refresh', $('#btnDRefresh'), '重启中…', '守护更新');
+// 就地升级：守护在跑时 exe 被系统锁住（覆写报 WinError 32），用户手动替换
+// 会失败。这里由程序自己"停守护 → 旧文件让位 → 新文件就位 → 拉起新守护"。
+$('#btnUpgrade').onclick = () => {
+  const up = lastSt.upgrade || {};
+  confirmDialog({
+    title: '升级到 v' + (up.version || ''),
+    html: '将把程序目录里的 <b>' + esc(up.name || '')
+        + '</b> 替换为当前程序，并<b>重启后台守护</b>。<br><br>'
+        + '升级完成后需要<b>关闭并重新打开本界面</b>，新版本才会完全生效。'
+        + '旧版本会保留为备份，下次启动自动清理。确定继续？',
+    okText: '立即升级',
+    onOk: () => withTask('/api/upgrade/apply', $('#btnUpgrade'), '升级中…', '就地升级')
+  });
+};
+$('#btnSelfTest').onclick = () => withTask('/api/self-test', $('#btnSelfTest'), '自检中…', '自检');
+$('#btnHealth').onclick = () => {
+  if (!lastSt || !lastSt.daemon){
+    toast('体检需要后台守护配合，请先在下方点「启动守护」', 3600);
+    return;
+  }
+  confirmDialog({
+  title: '一键体检',
+  html: '体检将<b>立即下线当前网络</b>，然后由后台守护自动重连，验证「断线自动恢复」链路。<br><br>期间可能断网约 <b>75 秒</b>，请勿在下载 / 直播 / 游戏等场景下进行。确定继续？',
+  okText: '确认体检',
+  onOk: () => withTask('/api/health', $('#btnHealth'), '体检中…', '一键体检')
+  });
+};
+
+/* ---------- 版本更新（自动检查 + 一键下载升级）---------- */
+async function checkUpdate(btn){
+  busy(true, btn, '检查中…');
+  try{
+    const r = await post('/api/update/check', {});
+    const u = (r && r.update) || {};
+    if (u.ok && u.available) toast('发现新版本 v' + u.latest, 4000);
+    else if (u.ok) toast('已是最新版本 v' + (u.latest || ''), 3200);
+    else toast('检查失败：' + (u.error || '网络不可用'), 4000);
+  }catch(e){ toast('检查失败：' + e, 4000); }
+  busy(false, btn);
+  load();
+}
+async function openRelease(){
+  const url = (lastSt && lastSt.update && lastSt.update.url)
+    || 'https://github.com/Origin-XiChen/campus-net-auth/releases';
+  try{
+    const r = await post('/api/update/open', {});
+    if (!(r && r.ok)) toast('打开失败，请手动访问：' + url, 5000);
+  }catch(e){ toast('打开失败：' + e, 4000); }
+}
+$('#btnUpdateCheck').onclick = () => checkUpdate($('#btnUpdateCheck'));
+$('#btnOpenRelease').onclick = () => openRelease();
+// 一键下载并升级：下载/校验在后台任务里跑，前端用 withTask 轮询结果
+$('#btnUpdateInstall').onclick = () => {
+  const u = (lastSt && lastSt.update) || {};
+  const size = u.asset_size ? ('约 ' + (u.asset_size / 1048576).toFixed(1) + ' MB')
+                            : 'Release 资产';
+  confirmDialog({
+    title: '下载并升级到 v' + (u.latest || ''),
+    html: '将下载 <b>v' + esc(u.latest || '') + '</b>（' + size + '）并<b>就地升级</b>：'
+        + '停止守护 → 替换程序文件 → 用新版本重启守护。<br><br>'
+        + '下载后会校验 <b>SHA256 + 文件版本</b>；升级完成后需要<b>关闭并重新打开本界面</b>。确定继续？',
+    okText: '下载并升级',
+    onOk: () => withTask('/api/update/install', $('#btnUpdateInstall'), '下载中…', '下载并升级')
+  });
+};
+$('#btnOpenRelease2').onclick = () => openRelease();
+// 彻底卸载：打开同目录的独立卸载器（它自己的窗口里再确认一次）。
+// ⚠️ 必须是独立 exe：Windows 下运行中的主 exe 删不掉自己；卸载器会连本界面
+// 进程一起收掉，所以这里只负责把它拉起来，不做任何"先删点什么"的动作。
+$('#btnPurge').onclick = () => confirmDialog({
+  title: '彻底卸载本程序',
+  html: '将打开 <b>CampusNetAuthUninstall.exe</b>：<br>'
+      + '停止后台守护 → 删除开机自启项 → 清空本目录的程序文件、日志与缓存。<br><br>'
+      + '它<b>只删本程序自己的文件</b>（目录里你自己的文件会保留，目录也会保留）。<br>'
+      + '确认后请在弹出的卸载窗口里再次确认。',
+  okText: '打开卸载程序',
+  onOk: async () => {
+    try{
+      const r = await post('/api/uninstall', {});
+      toast((r && r.ok) ? (r.message || '卸载程序已启动')
+                        : ('启动失败：' + ((r && r.error) || '未知原因')), 5000);
+    }catch(e){ toast('出错：' + e, 3600); }
+  }
+});
+$('#deployBannerClose').onclick = () => { deployBannerDone = true; $('#deployBanner').style.display = 'none'; };
+$('#btnSaveAuto').onclick = async () => {
+  await post('/api/config', {
+    interval: $('#inInterval').value,
+    offline_interval: $('#inOffline').value,
+    retry_interval: $('#inRetry').value,
+    max_interval: $('#inMax').value,
+    timeout: $('#inTimeout').value
+  });
+  toast('设置已保存');
+  load();
+};
+
+load();
+setInterval(load, 20000);
+</script>
+</body>
+</html>
