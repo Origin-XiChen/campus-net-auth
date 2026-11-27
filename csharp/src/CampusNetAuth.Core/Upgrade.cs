@@ -54,18 +54,7 @@ public static class Upgrade
     /// 是否运行在安装器（Velopack）布局里：&lt;root&gt;\current\CampusNetAuth.exe，
     /// 旁边有 Update.exe。安装版由安装器/更新器管理文件，不能用裸 exe 换位升级。
     /// </summary>
-    public static bool IsInstalledLayout()
-    {
-        try
-        {
-            var parent = Directory.GetParent(AppInfo.BaseDir)?.FullName;
-            return parent != null && File.Exists(Path.Combine(parent, "Update.exe"));
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    public static bool IsInstalledLayout() => AppInfo.IsInstalled;
 
     public static (string? Path, string? Version) FindCandidate()
     {

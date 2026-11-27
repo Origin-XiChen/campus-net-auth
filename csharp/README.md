@@ -60,6 +60,14 @@ powershell -ExecutionPolicy Bypass -File csharp/build_icon.ps1
 - 渲染器的 WebView2 用户数据目录放在工具目录下（受限沙箱里工作区内的 exe
   不能往工作区外写）。
 
+## 数据目录
+
+- **开发 / 绿色版**：`config.json / cred.bin / state.json / campusnet.log` 在 exe 同目录
+  （与 Python 版一致，便于对拍与迁移）；
+- **安装版（Velopack 布局）**：在 `%APPDATA%\CampusNetAuth`；首次启动会把 exe
+  同目录的旧数据**复制**过去（不覆盖已有文件）；
+- 可用 `CNA_DATA_DIR` 环境变量覆盖（测试/便携场景）。
+
 ## 安装器（Velopack）
 
 ```powershell
