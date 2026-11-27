@@ -77,6 +77,18 @@ public static class Json
         catch { return def; }
     }
 
+    public static long GetInt64(this JsonObject o, string key, long def = 0)
+    {
+        var n = o[key];
+        if (n == null) return def;
+        try
+        {
+            var raw = n.ToJsonString();
+            return long.TryParse(raw, out var v) ? v : def;
+        }
+        catch { return def; }
+    }
+
     public static bool GetBool(this JsonObject o, string key, bool def = false)
     {
         var n = o[key];
