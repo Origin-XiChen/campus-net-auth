@@ -40,9 +40,25 @@ stop / proxy / update / upgrade / install / uninstall / log / test`。
 - 里程碑 2：守护循环 + 控制通道、自启、代理守卫、更新检查/下载校验、就地升级、CLI
 - 里程碑 3（已完成）：本地 HTTP API（26 端点）+ WebView2 无边框窗口 + 托盘；
   页面加载后自动轮询 `/api/status`，token/回环 Host 校验生效
-- 里程碑 4（进行中）：图标（16–256 ICO + splash）与 Velopack 安装器已完成；
+- 里程碑 4（进行中）：**代码绘制**的图标（16–256 ICO + splash）与 Velopack
+  安装器已完成；
   安装版内置更新（Velopack UpdateManager）与数据目录迁移到 `%APPDATA%` 待做；
   与 Python 版行为对拍、迁移文档待做
+
+## 图标（代码绘制，无 AI 水印）
+
+图标由 `assets/icon.html`（HTML/CSS + 手写 SVG 路径）描述，经
+`tools/IconRenderer`（WebView2 无头渲染，透明背景）导出为 PNG，再由
+`tools/make_assets.py` 生成多尺寸 ICO 与安装引导图：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File csharp/build_icon.ps1
+```
+
+- 无水印、可审阅、可复现；改颜色/形状直接改 `icon.html`；
+- 产物：`assets/app.ico`（16–256）、`app-1024.png`、`app-256.png`、`splash.png`；
+- 渲染器的 WebView2 用户数据目录放在工具目录下（受限沙箱里工作区内的 exe
+  不能往工作区外写）。
 
 ## 安装器（Velopack）
 
