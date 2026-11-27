@@ -34,7 +34,9 @@ internal static class Program
             return 0;
         }
 
-        // 目录搬走 / 绿色版迁移到安装版后，把旧的 Run 值改指当前 exe（静默，失败无感）
+        // 目录搬走 / 绿色版迁移到安装版：先导入旧数据并登记待清理目录（要在自启自愈之前读 Run 值）
+        var legacyDir = LegacyCleanup.Prepare();
+        // 然后才把旧的 Run 值改指当前 exe（静默，失败无感）
         Autostart.Repair();
 
         var firstDeploy = !File.Exists(AppInfo.StatePath);
@@ -62,6 +64,29 @@ internal static class Program
                 "url=" + url + Environment.NewLine);
         }
         catch { }
+
+        // 旧版目录清理放后台：先让窗口出来，再停旧守护/删目录（SHFileOperation 需要 STA）
+        if (legacyDir != null)
+        {
+            var cleanup = new Thread(() =>
+            {
+                try
+                {
+                    Thread.Sleep(1200);
+                    LegacyCleanup.Cleanup(legacyDir);
+                }
+                catch (Exception e)
+                {
+                    Log.Warn("旧版目录清理线程异常: {0}", e.Message);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "cna-legacy-cleanup",
+            };
+            cleanup.SetApartmentState(ApartmentState.STA);
+            cleanup.Start();
+        }
 
         Application.Run(new MainForm(server));
         return 0;

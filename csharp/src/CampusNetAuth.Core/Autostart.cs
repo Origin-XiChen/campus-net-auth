@@ -101,6 +101,15 @@ public static class Autostart
         return reference.Trim();
     }
 
+    /// <summary>Run 值里引用的可执行文件路径（未做存在性判断）。</summary>
+    internal static string? ReferencedPath()
+    {
+        var value = ReadValue();
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var reference = ExtractReference(value);
+        return reference.Length > 0 ? reference : null;
+    }
+
     /// <summary>自启链路健康检查：Run 键指向的 exe 是否存在。</summary>
     public static (bool Ok, string Reason) Health()
     {

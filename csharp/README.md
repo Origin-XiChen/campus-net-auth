@@ -58,8 +58,9 @@ stop / proxy / update / upgrade / install / uninstall / log / test`。
 - 里程碑 4（已完成）：**代码绘制**的图标（16–256 ICO + splash）、Velopack
   安装器、安装版内置更新（UpdateManager）、数据目录迁移到 `%APPDATA%`、
   系统通知（AUMID + Shell_NotifyIcon，守护进程也能弹）、安装版卸载接管
-  （`Update.exe --uninstall`）、自启命令自愈 + 卸载时移除自启
-- 里程碑 5（进行中）：与 Python 版行为对拍、单测移植（当前 C# 自检 10 项）
+  （`Update.exe --uninstall`）、自启命令自愈 + 卸载时移除自启、
+  旧版目录自动迁移清理（导入数据 → 停旧守护 → 整目录移入回收站 → 失败重试）
+- 里程碑 5（进行中）：与 Python 版行为对拍、单测移植（当前 C# 自检 19 项）
 
 ## 图标（代码绘制，无 AI 水印）
 
@@ -97,22 +98,22 @@ powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1
   上传 `releases.win.json` 与 `*.nupkg`（vpk pack 产物）**，否则安装版检查不到更新；
 - 当前未签名：SmartScreen 会提示，正式分发需要代码签名证书。
 
-## 从 0.6.x（绿色版）迁移到 0.7.0（安装版）
+## 从绿色版（0.6.x / 0.7.x）迁移到安装版
 
 1. 运行 `CampusNetAuth-win-Setup.exe`（单用户安装，无需管理员）。安装器会装到
    `%LOCALAPPDATA%\CampusNetAuth`，创建桌面与开始菜单快捷方式，并自动启动一次。
-2. **配置/凭据不会自动从旧绿色目录搬过来**：安装版只从自己的安装目录迁移
-   `config.json / cred.bin / state.json / campusnet.log`。旧目录里的数据需要手动复制：
-   先退出安装版（托盘「退出」），把旧目录的 `config.json`、`cred.bin` 复制到
-   `%APPDATA%\CampusNetAuth`，再启动安装版。
-3. **开机自启**：安装版启动时会把指向旧绿色目录的 Run 值改指安装版（另一份仍然存在
-   的绿色安装也会被接管——安装版是唯一正规入口）。改完旧的 `CampusNetAuth.exe daemon`
-   就不再随开机启动，可以删除旧绿色目录了。
+2. **首次启动自动迁移**：读取开机自启 Run 值指向的旧目录，把
+   `config.json / cred.bin / state.json` 复制到 `%APPDATA%\CampusNetAuth`（不覆盖已有），
+   把自启改指安装版，停掉旧版守护/界面，然后把**旧目录整体移入回收站**（可恢复）。
+   导入失败或文件被占用时跳过删除，记录 `legacy_cleanup_pending`，下次启动重试。
+3. 回收站不可用（组策略禁用等）时退化为"只删旧版已知程序文件"，未知用户文件保留。
 4. 守护与界面仍是同一个 exe 的两个进程，控制通道仍是 `127.0.0.1:47667`；
    迁移期 C# 与 Python 守护互相可见（`VER` 协议互通），但不能同时跑两个守护。
 5. 卸载：界面「彻底卸载」或系统设置 → 应用。卸载会停止守护、移除开机自启、删除程序
    文件与快捷方式；**`%APPDATA%\CampusNetAuth` 会保留**（重装免配置），需要彻底清理
    请手动删除该目录。
+
+> 想保留旧目录做备份，请在安装前把旧目录移走/改名；否则安装版首次启动会按上述规则清理它。
 
 ## 原生窗口风格原则（重要）
 

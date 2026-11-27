@@ -34,8 +34,9 @@ public static class Upgrade
                 if (VersionApi.VerQueryValueW(buffer, sub, out var prodPtr, out var prodLen)
                     && prodPtr != IntPtr.Zero)
                 {
+                    // VerQueryValue 的字符串长度单位是字符（含结尾 NUL），不要再除以 2
                     product = System.Runtime.InteropServices.Marshal
-                        .PtrToStringUni(prodPtr, (int)(prodLen / 2)).Trim().TrimEnd('\0');
+                        .PtrToStringUni(prodPtr, (int)prodLen).TrimEnd('\0').Trim();
                 }
             }
             return (ver, product);

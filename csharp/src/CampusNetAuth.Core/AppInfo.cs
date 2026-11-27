@@ -99,11 +99,14 @@ public static class AppInfo
     public static string LogPath => Path.Combine(DataDir, "campusnet.log");
     public static string DaemonPidPath => Path.Combine(DataDir, "daemon.pid");
 
-    /// <summary>把 "0.5.4" 归一成可比较的数字数组；无法解析返回 null。</summary>
+    /// <summary>把 "0.5.4" / "1.0.0-preview.1" 归一成可比较的数字数组；无法解析返回 null。</summary>
     public static int[]? VerKey(string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return null;
-        var parts = text.Trim().Split('.');
+        var core = text.Trim();
+        var cut = core.IndexOfAny(new[] { '-', '+' });
+        if (cut >= 0) core = core[..cut];
+        var parts = core.Split('.');
         if (parts.Length == 0 || parts.Length > 4) return null;
         var nums = new List<int>(parts.Length);
         foreach (var p in parts)

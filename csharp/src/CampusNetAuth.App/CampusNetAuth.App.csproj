@@ -9,6 +9,7 @@
     <RootNamespace>CampusNetAuth.App</RootNamespace>
     <AssemblyName>CampusNetAuth</AssemblyName>
     <Version>0.7.0</Version>
+    <Product>CampusNetAuth</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>

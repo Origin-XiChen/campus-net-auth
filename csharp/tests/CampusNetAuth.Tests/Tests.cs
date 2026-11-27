@@ -103,6 +103,48 @@ public static class VersionTests
         Assert.True(AppInfo.IsNewer("0.6.0", "0.6"), "0.6.0 > 0.6");
         Assert.False(AppInfo.IsNewer("bad", "0.6.1"), "非法版本");
     }
+
+    public static void PrereleaseSuffix()
+    {
+        Assert.True(AppInfo.IsNewer("1.0.0-preview.1", "0.7.0"), "预发布高于旧版");
+        Assert.True(AppInfo.IsNewer("1.0.0-preview.2", "0.6.4"), "预发布高于旧版（另一组）");
+        // 只按数字段比较：1.0.0 与 1.0.0-preview.1 视为同段相等（预发布先后交给 Velopack）
+        Assert.False(AppInfo.IsNewer("1.0.0", "1.0.0-preview.1"), "同数字段不判新");
+        Assert.Equal(3, AppInfo.VerKey("1.0.0-preview.1")!.Length, "后缀被剥离");
+        Assert.Equal(3, AppInfo.VerKey("1.0.0+build.5")!.Length, "构建元数据被剥离");
+    }
+
+    /// <summary>回归：VerQueryValue 的长度是字符数，ProductName 不能被截断。</summary>
+    public static void PeProductNameNotTruncated()
+    {
+        var dll = typeof(Upgrade).Assembly.Location;
+        var info = Upgrade.PeVersion(dll);
+        Assert.True(info != null, "读取程序集版本资源");
+        Assert.Equal("CampusNetAuth.Core", info!.Value.Product, "ProductName 完整读取");
+        Assert.Equal(AppInfo.Version, info.Value.Version, "版本主三段");
+    }
+}
+
+public static class LegacyCleanupTests
+{
+    public static void SafetyValve()
+    {
+        Assert.True(LegacyCleanup.IsUnsafeDir(AppInfo.BaseDir), "当前程序目录");
+        Assert.True(LegacyCleanup.IsUnsafeDir(
+            Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(AppInfo.BaseDir))!), "安装根目录");
+        Assert.True(LegacyCleanup.IsUnsafeDir(Path.GetPathRoot(AppInfo.BaseDir)!), "盘根");
+        Assert.True(LegacyCleanup.IsUnsafeDir(@"\\server\share\CampusNetAuth"), "网络路径");
+        Assert.True(LegacyCleanup.IsUnsafeDir(""), "空路径");
+        Assert.False(LegacyCleanup.IsUnsafeDir(@"C:\OldApps\CampusNetAuth"), "普通旧目录");
+    }
+
+    public static void PathUnder()
+    {
+        Assert.True(LegacyCleanup.IsUnder(@"C:\Apps\Old\CampusNetAuth.exe", @"C:\Apps\Old"), "直接子文件");
+        Assert.True(LegacyCleanup.IsUnder(@"C:\Apps\Old\sub\x.exe", @"C:\Apps\Old\"), "子目录");
+        Assert.False(LegacyCleanup.IsUnder(@"C:\Apps\Older\CampusNetAuth.exe", @"C:\Apps\Old"), "同前缀不同目录");
+        Assert.False(LegacyCleanup.IsUnder(@"C:\Apps\Old", @"C:\Apps\Old"), "目录本身不算在内");
+    }
 }
 
 public static class ConfigTests

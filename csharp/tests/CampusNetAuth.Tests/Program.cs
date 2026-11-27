@@ -67,6 +67,26 @@ public static class Program
     /// <summary>手动探针：确认真实系统气泡能弹（含守护进程那条临时图标通道），默认测试不触发。</summary>
     private static int ManualProbe(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--pe")
+        {
+            var path = args[1];
+            var info = Upgrade.PeVersion(path);
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? "";
+            Console.WriteLine($"exists={File.Exists(path)} name={Path.GetFileName(path)}");
+            Console.WriteLine($"version={info?.Version} product={info?.Product}");
+            Console.WriteLine($"newerThanCurrent={AppInfo.IsNewer(AppInfo.Version, info?.Version)}");
+            Console.WriteLine($"unsafeDir={LegacyCleanup.IsUnsafeDir(dir)} dir={dir}");
+            foreach (var m in new[]
+                     {
+                         "CampusNetAuthUninstall.exe", "CampusNetAuthDaemon.vbs",
+                         "CampusNetAuthUI.vbs", "state.json", "config.json",
+                         "campusnet.log", "daemon.pid",
+                     })
+            {
+                Console.WriteLine($"marker {m}={File.Exists(Path.Combine(dir, m))}");
+            }
+            return 0;
+        }
         if (!args.Contains("--notify")) return -1;
         var ok = Notify.System("校园网无感认证", "通知通道自检（临时图标通道）", 5, dedup: false);
         Console.WriteLine(ok ? "notify dispatched" : "notify failed");
@@ -119,6 +139,8 @@ public static class Program
         Run("反转按 UTF-16 code unit", RsaGoldenTests.ReverseUnitsMatchesJs);
         Run("双重 URL 编码", RsaGoldenTests.DoubleUrlEncode);
         Run("版本比较", VersionTests.ComparesNumerically);
+        Run("版本比较（预发布后缀）", VersionTests.PrereleaseSuffix);
+        Run("PE 版本/产品名读取", VersionTests.PeProductNameNotTruncated);
         Run("配置归一（坏值回落）", ConfigTests.SanitizeFallsBack);
         Run("配置归一（hints）", ConfigTests.SanitizeHints);
         Run("配置归一（边界钳制）", ConfigTests.SanitizeClamps);
@@ -129,6 +151,8 @@ public static class Program
         Run("工具函数（掩码/时长）", UtilsTests.MaskAndUptime);
         Run("手动下线静默期（落盘/清除）", StateTests.LogoutPauseRoundTrip);
         Run("事件记录（合并/上限）", StateTests.EventLogMergeAndTrim);
+        Run("旧版清理安全阀", LegacyCleanupTests.SafetyValve);
+        Run("旧版清理路径归属", LegacyCleanupTests.PathUnder);
 
         Console.WriteLine();
         Console.WriteLine(Failures.Count == 0
