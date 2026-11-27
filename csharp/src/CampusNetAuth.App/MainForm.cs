@@ -24,6 +24,9 @@ public sealed class MainForm : Form
     private const int WsMaximizeBox = 0x00010000;
     private const int WsSysMenu = 0x00080000;
     private const int WmSysCommand = 0x0112;
+    private const int ScMinimize = 0xF020;
+    private const int ScMaximize = 0xF030;
+    private const int ScRestore = 0xF120;
     private const uint TpmReturnCmd = 0x0100;
     private const uint TpmRightButton = 0x0002;
     private const int DwmwaWindowCornerPreference = 33;
@@ -190,6 +193,35 @@ public sealed class MainForm : Form
     }
 
     /// <summary>标题栏右键 → 原生系统菜单（还原/移动/大小/最小化/最大化/关闭）。</summary>
+    /// <summary>
+    /// 原生拖拽：最大化时先把窗口就地还原到光标下（与系统"拖拽还原"一致），
+    /// 再进入系统的移动循环（自带 Aero Snap / 贴边最大化动画）。
+    /// </summary>
+    private void BeginNativeDrag()
+    {
+        try
+        {
+            if (WindowState == FormWindowState.Maximized)
+            {
+                var cursor = Cursor.Position;
+                var restore = RestoreBounds;
+                var ratioX = Width > 0 ? (double)(cursor.X - Left) / Width : 0.5;
+                WindowState = FormWindowState.Normal;
+                var w = restore.Width > 0 ? restore.Width : Width;
+                var h = restore.Height > 0 ? restore.Height : Height;
+                var work = Screen.FromPoint(cursor).WorkingArea;
+                var left = cursor.X - (int)(w * Math.Clamp(ratioX, 0.05, 0.95));
+                var top = cursor.Y - 16;
+                left = Math.Clamp(left, work.Left, Math.Max(work.Left, work.Right - w));
+                top = Math.Clamp(top, work.Top, Math.Max(work.Top, work.Bottom - h));
+                Bounds = new Rectangle(left, top, w, h);
+            }
+        }
+        catch { }
+        ReleaseCapture();
+        SendMessageW(Handle, WmNclButtonDown, (IntPtr)HtCaption, IntPtr.Zero);
+    }
+
     private void ShowSystemMenu()
     {
         try
@@ -305,8 +337,7 @@ public sealed class MainForm : Form
                     var type = obj.GetString("type");
                     if (type == "drag")
                     {
-                        ReleaseCapture();
-                        SendMessageW(Handle, WmNclButtonDown, (IntPtr)HtCaption, IntPtr.Zero);
+                        BeginNativeDrag();
                     }
                     else if (type == "resize"
                              && ResizeHits.TryGetValue(obj.GetString("dir"), out var hit))
@@ -379,13 +410,15 @@ public sealed class MainForm : Form
             switch (action)
             {
                 case "minimize":
-                    WindowState = FormWindowState.Minimized;
+                    // 走系统命令：最小化动画跟随"动画窗口"设置
+                    SendMessageW(Handle, WmSysCommand, (IntPtr)ScMinimize, IntPtr.Zero);
                     break;
                 case "maximize":
                     UpdateMaximizedBounds();
-                    WindowState = WindowState == FormWindowState.Maximized
-                        ? FormWindowState.Normal
-                        : FormWindowState.Maximized;
+                    // 走系统命令：最大化/还原动画与原生窗口一致
+                    SendMessageW(Handle, WmSysCommand,
+                        (IntPtr)(WindowState == FormWindowState.Maximized ? ScRestore : ScMaximize),
+                        IntPtr.Zero);
                     break;
                 case "close":
                     Close();
