@@ -77,12 +77,28 @@ internal static class Cli
             case "daemon":
                 Log.ToConsole = true;
                 return Daemon.Run(cfg);
-            case "start": return Daemon.Start() ? 0 : 1;
-            case "stop": return Daemon.Stop() ? 0 : 1;
+            case "start":
+                DaemonGuard.ClearManualStop();
+                return Daemon.Start() ? 0 : 1;
+            case "stop":
+            {
+                var stopped = Daemon.Stop();
+                if (stopped) DaemonGuard.MarkManualStop();
+                return stopped ? 0 : 1;
+            }
             case "proxy": return CmdProxy(cfg, args);
             case "update": return CmdUpdate(args);
             case "upgrade": return CmdUpgrade(args);
-            case "install": return Autostart.Install() ? 0 : 1;
+            case "install":
+            {
+                var ok = Autostart.Install();
+                if (ok)
+                {
+                    DaemonGuard.ClearManualStop();
+                    if (!Daemon.IsRunning()) Daemon.Start();
+                }
+                return ok ? 0 : 1;
+            }
             case "uninstall": return Autostart.Uninstall() ? 0 : 1;
             case "test": return CmdTest(cfg);
             default:
@@ -130,6 +146,8 @@ internal static class Cli
 
     private static string ReadPassword()
     {
+        // 输出被重定向（脚本/管道）时没有控制台键盘：退化为按行读取
+        if (Console.IsInputRedirected) return Console.ReadLine() ?? "";
         var sb = new StringBuilder();
         while (true)
         {

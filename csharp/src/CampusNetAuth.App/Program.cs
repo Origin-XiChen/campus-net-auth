@@ -88,6 +88,25 @@ internal static class Program
             cleanup.Start();
         }
 
+        // 界面一起来就确保后台守护在跑；关闭界面不会停守护。
+        // 只接管"同一份程序"的旧守护，端口被别的部署占用时不动手。
+        new Thread(() =>
+        {
+            try
+            {
+                Thread.Sleep(2000);
+                DaemonGuard.EnsureAfterUiStart();
+            }
+            catch (Exception e)
+            {
+                Log.Warn("界面启动守护自检异常: {0}", e.Message);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "cna-daemon-guard",
+        }.Start();
+
         Application.Run(new MainForm(server));
         return 0;
     }

@@ -196,6 +196,7 @@ public static class Daemon
         }
 
         WritePid();
+        DaemonGuard.ClearManualStop();
         try
         {
             var cred = CredentialStore.Load();

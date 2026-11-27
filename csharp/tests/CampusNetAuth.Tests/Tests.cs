@@ -279,6 +279,27 @@ public static class HtmlTests
     }
 }
 
+public static class DaemonGuardTests
+{
+    public static void ManualStopMarker()
+    {
+        State.Save(new JsonObject());
+        Assert.False(DaemonGuard.ManuallyStoppedThisBoot(), "初始无标记");
+        DaemonGuard.MarkManualStop();
+        Assert.True(DaemonGuard.ManuallyStoppedThisBoot(), "标记生效");
+        DaemonGuard.ClearManualStop();
+        Assert.False(DaemonGuard.ManuallyStoppedThisBoot(), "清除后失效");
+
+        // 模拟重启：存量 tick 大于本次开机时长 → 标记应失效并清掉
+        State.Update(new JsonObject
+        {
+            ["daemon_manual_stop_tick"] = Environment.TickCount64 + 60_000_000,
+        });
+        Assert.False(DaemonGuard.ManuallyStoppedThisBoot(), "重启后失效");
+        Assert.IsNull(State.Load()["daemon_manual_stop_tick"], "失效后清键");
+    }
+}
+
 public static class UtilsTests
 {
     public static void MaskAndUptime()

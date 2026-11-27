@@ -129,17 +129,33 @@ public sealed class ApiServer : IDisposable
             case "/api/task":
                 return JsonResponse(TaskStatus(request.QueryValue("id") ?? ""));
             case "/api/daemon/start":
+                DaemonGuard.ClearManualStop();
                 return JsonResponse(new JsonObject { ["ok"] = Daemon.Start() });
             case "/api/daemon/stop":
-                return JsonResponse(new JsonObject { ["ok"] = Daemon.Stop() });
+            {
+                var ok = Daemon.Stop();
+                if (ok) DaemonGuard.MarkManualStop();
+                return JsonResponse(new JsonObject { ["ok"] = ok });
+            }
             case "/api/daemon/restart":
+                DaemonGuard.ClearManualStop();
                 Daemon.Stop();
                 Thread.Sleep(800);
                 return JsonResponse(new JsonObject { ["ok"] = Daemon.Start() });
             case "/api/daemon/refresh":
+                DaemonGuard.ClearManualStop();
                 return JsonResponse(new JsonObject { ["id"] = StartTask(DaemonRefreshTask, "daemon_refresh") });
             case "/api/autostart/install":
-                return JsonResponse(new JsonObject { ["ok"] = Autostart.Install(), ["message"] = "开机自启已启用" });
+            {
+                var ok = Autostart.Install();
+                if (ok)
+                {
+                    // 启用自启意味着希望后台常驻：顺手拉起守护并解除手动停止标记
+                    DaemonGuard.ClearManualStop();
+                    if (!Daemon.IsRunning()) Daemon.Start();
+                }
+                return JsonResponse(new JsonObject { ["ok"] = ok, ["message"] = "开机自启已启用" });
+            }
             case "/api/autostart/uninstall":
                 return JsonResponse(new JsonObject { ["ok"] = Autostart.Uninstall(), ["message"] = "开机自启已移除" });
             case "/api/proxy/off":
@@ -485,6 +501,7 @@ public sealed class ApiServer : IDisposable
 
     private string DaemonRefreshTask()
     {
+        DaemonGuard.ClearManualStop();
         var (stale, ver, reason) = Daemon.Stale();
         if (!stale) return $"后台守护已是当前版本 v{AppInfo.Version}，无需处理。";
         var before = ver;

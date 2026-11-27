@@ -153,6 +153,7 @@ public static class Program
         Run("事件记录（合并/上限）", StateTests.EventLogMergeAndTrim);
         Run("旧版清理安全阀", LegacyCleanupTests.SafetyValve);
         Run("旧版清理路径归属", LegacyCleanupTests.PathUnder);
+        Run("守护手动停止标记", DaemonGuardTests.ManualStopMarker);
 
         Console.WriteLine();
         Console.WriteLine(Failures.Count == 0
