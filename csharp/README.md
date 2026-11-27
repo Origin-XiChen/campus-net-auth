@@ -93,16 +93,17 @@ powershell -ExecutionPolicy Bypass -File csharp/build_icon.ps1
 ## 绿色单文件构建（0.6.x 的兼容升级件）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File csharp/build_green.ps1
+powershell -ExecutionPolicy Bypass -File csharp/build_green.ps1 [-Version 0.7.0]
 # 产物：csharp/dist/green/CampusNetAuth.exe（约 50 MB，自包含单文件）
 ```
 
 - 自包含 win-x64 + 压缩单文件；首次运行把原生库解包到 `%TEMP%\.net\...`，之后启动很快
   （实测 `--version` 约 0.3 秒）；
-- PE `FileVersion = 0.7.0.0`、`ProductName = CampusNetAuth`，满足 Python 0.6.x 升级器的
-  资产名/版本/产品名校验；配置、凭据（DPAPI）、状态、Run 自启、`daemon` 参数全部兼容，
-  可直接替换旧 exe；
-- 脚本会校验 `AppInfo.Version` 与 csproj `<Version>` 一致，避免 `--version` 与 PE 版本不符；
+- PE `FileVersion` / `ProductName` 与请求版本一致（脚本构建后会校验），满足 Python 0.6.x
+  升级器的资产名/版本/产品名校验；配置、凭据（DPAPI）、状态、Run 自启、`daemon` 参数
+  全部兼容，可直接替换旧 exe；
+- **版本单一来源是 csproj `<Version>`**：`AppInfo.Version` 读程序集 InformationalVersion，
+  构建时可用 `-p:Version=...` / 脚本 `-Version ...` 覆盖（例如用同一份最新代码构建 0.7.0 修订版）；
 - 受限沙箱里验证时需把 `DOTNET_BUNDLE_EXTRACT_BASE_DIR`、`CNA_DATA_DIR`、`TEMP/TMP`
   指向工作区内目录（工作区内的 exe 不能写 `%TEMP%` / `%LOCALAPPDATA%`）；真实用户无此限制。
 

@@ -1,13 +1,14 @@
 using System.Globalization;
+using System.Reflection;
 
 namespace CampusNetAuth;
 
-/// <summary>全局常量与路径。版本以这里为单一来源（对齐 Python 版的 APP_VERSION 约定）。</summary>
+/// <summary>全局常量与路径。版本以 csproj &lt;Version&gt; 为单一来源（构建时可用 -p:Version 覆盖）。</summary>
 public static class AppInfo
 {
     public const string AppName = "CampusNetAuth";
     // 1.0.0 起切安装版（Velopack）；预发布号用 SemVer2（-preview.N）
-    public const string Version = "1.0.0-preview.3";
+    public static string Version { get; } = ResolveVersion();
 
     public const string GitHubRepo = "Origin-XiChen/campus-net-auth";
     public const string GitHubReleasesUrl = "https://github.com/" + GitHubRepo + "/releases";
@@ -25,6 +26,32 @@ public static class AppInfo
 
     public static string BaseDir { get; } =
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
+
+    /// <summary>
+    /// 版本号读程序集的 InformationalVersion（如 1.0.0-preview.3+hash），
+    /// 去掉构建元数据；这样同一份代码可用 -p:Version 构建不同版本。
+    /// </summary>
+    private static string ResolveVersion()
+    {
+        try
+        {
+            var info = typeof(AppInfo).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(info))
+            {
+                var v = info.Trim();
+                var plus = v.IndexOf('+');
+                if (plus > 0) v = v[..plus];
+                if (v.Length > 0) return v;
+            }
+            var ver = typeof(AppInfo).Assembly.GetName().Version;
+            if (ver != null) return $"{ver.Major}.{ver.Minor}.{ver.Build}";
+        }
+        catch
+        {
+        }
+        return "0.0.0";
+    }
 
     public static string ExePath { get; } =
         Environment.ProcessPath ?? Path.Combine(BaseDir, AppName + ".exe");
