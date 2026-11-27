@@ -60,7 +60,8 @@ stop / proxy / update / upgrade / install / uninstall / log / test`。
   系统通知（AUMID + Shell_NotifyIcon，守护进程也能弹）、安装版卸载接管
   （`Update.exe --uninstall`）、自启命令自愈 + 卸载时移除自启、
   旧版目录自动迁移清理（导入数据 → 停旧守护 → 整目录移入回收站 → 失败重试）
-- 里程碑 5（进行中）：与 Python 版行为对拍、单测移植（当前 C# 自检 19 项）
+- 里程碑 5（进行中）：与 Python 版行为对拍、单测移植（当前 C# 自检 19 项）；
+  绿色单文件构建已完成（0.7.0 兼容升级件）
 
 ## 图标（代码绘制，无 AI 水印）
 
@@ -84,6 +85,22 @@ powershell -ExecutionPolicy Bypass -File csharp/build_icon.ps1
 - **安装版（Velopack 布局）**：在 `%APPDATA%\CampusNetAuth`；首次启动会把 exe
   同目录的旧数据**复制**过去（不覆盖已有文件）；
 - 可用 `CNA_DATA_DIR` 环境变量覆盖（测试/便携场景）。
+
+## 绿色单文件构建（0.6.x 的兼容升级件）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File csharp/build_green.ps1
+# 产物：csharp/dist/green/CampusNetAuth.exe（约 50 MB，自包含单文件）
+```
+
+- 自包含 win-x64 + 压缩单文件；首次运行把原生库解包到 `%TEMP%\.net\...`，之后启动很快
+  （实测 `--version` 约 0.3 秒）；
+- PE `FileVersion = 0.7.0.0`、`ProductName = CampusNetAuth`，满足 Python 0.6.x 升级器的
+  资产名/版本/产品名校验；配置、凭据（DPAPI）、状态、Run 自启、`daemon` 参数全部兼容，
+  可直接替换旧 exe；
+- 脚本会校验 `AppInfo.Version` 与 csproj `<Version>` 一致，避免 `--version` 与 PE 版本不符；
+- 受限沙箱里验证时需把 `DOTNET_BUNDLE_EXTRACT_BASE_DIR`、`CNA_DATA_DIR`、`TEMP/TMP`
+  指向工作区内目录（工作区内的 exe 不能写 `%TEMP%` / `%LOCALAPPDATA%`）；真实用户无此限制。
 
 ## 安装器（Velopack）
 

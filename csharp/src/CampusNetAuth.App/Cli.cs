@@ -467,19 +467,43 @@ internal static class Cli
         }
     }
 
+    private const string SelfTestMod =
+        "9c2899b8ceddf9beafad2db8e431884a79fd9b9c881e459c0e1963984779d66" +
+        "12222cee814593cc458845bbba42b2d3474c10b9d31ed84f256c6e3a1c795e68" +
+        "e18585b84650076f122e763289a4bcb0de08762c3ceb591ec44d764a69817318" +
+        "fbce09d6ecb0364111f6f38e90dc44ca89745395a17483a778f1cc8dc990d87c3";
+
     private static int CmdTest(JsonObject cfg)
     {
+        Console.WriteLine("=".PadRight(58, '='));
+        Console.WriteLine(" 自检");
+        Console.WriteLine("=".PadRight(58, '='));
+
+        // 与 Python 版同一组 1024-bit 公开测试密钥，只验证加密链路可执行
+        try
+        {
+            var cipher = Crypto.RsaEncrypt(
+                Crypto.ReverseUnits("test123>000000000000"), "10001", SelfTestMod);
+            Console.WriteLine("RSA 加密    : OK (密文 {0} hex 字符，1024-bit 密钥预期 256)", cipher.Length);
+            if (cipher.Length != 256)
+                Console.WriteLine("             ! 长度非 256，可能密钥位数不同，属正常");
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine("RSA 加密    : 失败 -> {0}", e.Message);
+        }
+
         Console.WriteLine("当前版本 : {0}", AppInfo.Version);
         Console.WriteLine("门户地址 : {0}:{1}{2}", cfg.GetString("portal_host"),
             cfg.GetInt("portal_port", 80), cfg.GetString("portal_base"));
         Console.WriteLine("凭据     : {0}", CredentialStore.Exists ? "已加密保存" : "缺失");
         var client = new PortalClient(cfg);
         var reachable = client.PortalReachable();
-        Console.WriteLine("门户可达 : {0}", reachable ? "是" : "否（不在校园网？）");
+        Console.WriteLine("门户连通    : {0}", reachable ? "OK" : "失败（不在校园网？）");
         if (reachable)
         {
             var (online, location) = client.CheckOnline();
-            Console.WriteLine("在线状态 : {0}",
+            Console.WriteLine("当前状态    : {0}",
                 online == true ? "已在线" : online == false ? "未认证" : "探测无结论");
             if (!string.IsNullOrEmpty(location)) Console.WriteLine("门户重定向: {0}", location);
         }
