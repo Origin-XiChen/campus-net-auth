@@ -38,8 +38,17 @@ stop / proxy / update / upgrade / install / uninstall / log / test`。
 
 - 里程碑 1：核心层（Config/State/DPAPI/Crypto/Http/PortalClient）+ 黄金向量自检
 - 里程碑 2：守护循环 + 控制通道、自启、代理守卫、更新检查/下载校验、就地升级、CLI
-- 里程碑 3（待做）：本地 HTTP API 全端点 + WebView2 窗口 + 托盘 + 图标
-- 里程碑 4（待做）：安装器（Velopack/WiX）、与 Python 版行为对拍、迁移文档
+- 里程碑 3（已完成）：本地 HTTP API（26 端点）+ WebView2 无边框窗口 + 托盘；
+  页面加载后自动轮询 `/api/status`，token/回环 Host 校验生效
+- 里程碑 4（待做）：应用图标（多尺寸 ICO）、安装器（Velopack/WiX）、
+  与 Python 版行为对拍、迁移文档
+
+## 原生窗口风格原则（重要）
+
+程序的**所有**原生窗口都应与 HTML UI 的极简风格一致：无边框自绘标题栏、
+克制的单一主色、无系统渐变/大图标。包括但不限于安装器引导页、卸载器、
+错误对话框——不要直接弹 Win32/WinForms 默认样式的窗口；优先复用 UI 的
+HTML 页面（本地 HTTP + WebView2）或按同一套视觉规范自绘。
 
 ## 注意
 
