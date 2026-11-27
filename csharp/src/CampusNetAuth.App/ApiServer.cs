@@ -168,7 +168,7 @@ public sealed class ApiServer : IDisposable
                 {
                     ["ok"] = true,
                     ["update"] = AppInfo.IsInstalled
-                        ? VelopackUpdateInfo()
+                        ? VelopackUpdater.CheckInfo(force: true)
                         : UpdateCheck.CheckLatest(force: true),
                 });
             case "/api/update/open":
@@ -319,7 +319,9 @@ public sealed class ApiServer : IDisposable
                     ["name"] = Path.GetFileName(candidate),
                 }
                 : null,
-            ["update"] = UpdateCheck.Get(),
+            ["update"] = AppInfo.IsInstalled
+                ? VelopackUpdater.GetInfoOrStartCheck()
+                : UpdateCheck.Get(),
             // 安装版由 Velopack 的 Update.exe --uninstall 接管；绿色版没有独立卸载器
             ["install_mode"] = AppInfo.IsInstalled ? "installed" : "green",
             ["uninstaller"] = AppInfo.IsInstalled
@@ -490,28 +492,6 @@ public sealed class ApiServer : IDisposable
         if (!Daemon.Start())
             return $"守护仍是旧版本（{reason}），且无法自动重启：请先停止守护后重新启动程序。";
         return $"后台守护已重启为 v{AppInfo.Version}（原 v{before ?? "未知"}），新版本功能已生效。";
-    }
-
-    /// <summary>安装版：把 Velopack 检查结果映射成与 GitHub 检查一致的字段。</summary>
-    private static JsonObject VelopackUpdateInfo()
-    {
-        var (ok, message, update) = VelopackUpdater.Check();
-        var latest = update?.TargetFullRelease.Version.ToString() ?? "";
-        return new JsonObject
-        {
-            ["ok"] = ok,
-            ["current"] = AppInfo.Version,
-            ["latest"] = latest,
-            ["available"] = update != null,
-            ["url"] = AppInfo.GitHubReleasesUrl,
-            ["name"] = latest.Length > 0 ? AppInfo.AppName + " " + latest : "",
-            ["published_at"] = "",
-            ["checked_at"] = Utils.Now(),
-            ["error"] = ok ? "" : message,
-            ["asset_url"] = "",
-            ["asset_size"] = 0,
-            ["asset_sha256"] = "",
-        };
     }
 
     private string UpdateInstallTask()

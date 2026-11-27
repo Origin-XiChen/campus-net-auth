@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Velopack;
 using Velopack.Sources;
 
@@ -9,6 +10,11 @@ namespace CampusNetAuth.App;
 /// </summary>
 internal static class VelopackUpdater
 {
+    private const string StateKey = "velo_update_last";
+    private const long SuccessTtl = 6 * 3600;
+    private const long FailTtl = 300;
+    private static int _checking;
+
     private static UpdateManager Manager() =>
         new(new GithubSource($"https://github.com/{AppInfo.GitHubRepo}", null,
             // 预发布构建才收预发布 Release；正式版只看 latest
@@ -27,6 +33,100 @@ internal static class VelopackUpdater
         {
             Log.Warn("Velopack 检查更新失败: {0}", e.Message);
             return (false, e.Message, null);
+        }
+    }
+
+    /// <summary>
+    /// 带缓存的检查结果（状态卡片与手动检查共用）。成功缓存 6 小时、失败 5 分钟。
+    /// 返回字段与绿色版 UpdateCheck 对齐，UI 无需区分两种模式。
+    /// </summary>
+    public static JsonObject CheckInfo(bool force=false)
+    {
+        var cached = LoadCached();
+        if (!force && cached != null && Fresh(cached)) return (JsonObject)cached.DeepClone();
+
+        var (ok, message, update) = Check();
+        var latest = update?.TargetFullRelease.Version.ToString() ?? "";
+        var info = new JsonObject
+        {
+            ["ok"] = ok,
+            ["current"] = AppInfo.Version,
+            ["latest"] = latest,
+            ["available"] = update != null,
+            ["url"] = AppInfo.GitHubReleasesUrl,
+            ["name"] = latest.Length > 0 ? AppInfo.AppName + " " + latest : "",
+            ["published_at"] = "",
+            ["checked_at"] = Utils.Now(),
+            ["error"] = ok ? "" : message,
+            ["asset_url"] = "",
+            ["asset_size"] = 0,
+            ["asset_sha256"] = "",
+        };
+        SaveCached(info);
+        return (JsonObject)info.DeepClone();
+    }
+
+    /// <summary>状态轮询用：返回缓存；缓存过期时在后台补查一次，绝不阻塞接口。</summary>
+    public static JsonObject GetInfoOrStartCheck()
+    {
+        var cached = LoadCached();
+        if (cached != null && Fresh(cached)) return (JsonObject)cached.DeepClone();
+        if (Interlocked.CompareExchange(ref _checking, 1, 0) == 0)
+        {
+            Task.Run(() =>
+            {
+                try { CheckInfo(force: true); }
+                finally { Interlocked.Exchange(ref _checking, 0); }
+            });
+        }
+        return cached != null
+            ? (JsonObject)cached.DeepClone()
+            : new JsonObject
+            {
+                ["ok"] = false,
+                ["current"] = AppInfo.Version,
+                ["latest"] = "",
+                ["available"] = false,
+                ["url"] = AppInfo.GitHubReleasesUrl,
+                ["name"] = "",
+                ["published_at"] = "",
+                ["checked_at"] = 0,
+                ["error"] = "",
+                ["asset_url"] = "",
+                ["asset_size"] = 0,
+                ["asset_sha256"] = "",
+            };
+    }
+
+    private static JsonObject? LoadCached()
+    {
+        try
+        {
+            return State.Load()[StateKey]?.DeepClone() as JsonObject;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool Fresh(JsonObject info)
+    {
+        var checkedAt = info.GetInt64("checked_at");
+        if (checkedAt <= 0) return false;
+        var ttl = info.GetBool("ok") ? SuccessTtl : FailTtl;
+        return Utils.Now() - checkedAt < ttl;
+    }
+
+    private static void SaveCached(JsonObject info)
+    {
+        try
+        {
+            State.Update(new JsonObject { [StateKey] = info.DeepClone() });
+        }
+        catch (Exception e)
+        {
+            Log.Debug("保存更新检查结果失败: {0}", e.Message);
         }
     }
 
