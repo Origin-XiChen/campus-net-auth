@@ -7,13 +7,10 @@ namespace CampusNetAuth.Setup;
 /// 自绘安装引导：无边框、浅色、单一主色，与主程序同一套视觉。
 /// 只做三件事——选安装位置、开始安装、安装后启动；其余收在右侧「选项」。
 /// </summary>
-internal sealed class SetupForm : Form
+internal sealed class SetupForm : ShadowForm
 {
     private const int WmNclButtonDown = 0xA1;
     private const int HtCaption = 2;
-    private const int DwmwaWindowCornerPreference = 33;
-    private const int DwmwcpRound = 2;
-    private const int CsDropShadow = 0x20000;
 
     private static readonly Color Bg = Color.FromArgb(0xF5, 0xF5, 0xF7);
     private static readonly Color SideBg = Color.FromArgb(0xEC, 0xEC, 0xF1);
@@ -261,29 +258,6 @@ internal sealed class SetupForm : Form
         Shown += (_, _) => _install.Focus();
     }
 
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ClassStyle |= CsDropShadow;
-            return cp;
-        }
-    }
-
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        try
-        {
-            var pref = DwmwcpRound;
-            DwmSetWindowAttribute(Handle, DwmwaWindowCornerPreference, ref pref, sizeof(int));
-        }
-        catch
-        {
-        }
-    }
-
     private Control BuildTitleBar()
     {
         var bar = new Panel
@@ -421,7 +395,4 @@ internal sealed class SetupForm : Form
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 }

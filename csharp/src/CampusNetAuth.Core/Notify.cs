@@ -2,11 +2,31 @@ using System.Runtime.InteropServices;
 
 namespace CampusNetAuth;
 
+public enum NotifyKind
+{
+    Success,
+    Info,
+    Warning,
+    Error,
+}
+
+/// <summary>自定义右下角横幅/错误卡（由 App 层的 NotificationUi 绘制）。</summary>
+public sealed class NotifyRequest
+{
+    public NotifyKind Kind { get; init; } = NotifyKind.Info;
+    public string Title { get; init; } = "";
+    public string Message { get; init; } = "";
+    public string? Context { get; init; }
+    public bool ShowOpenSettings { get; init; }
+    public int AutoCloseSeconds { get; init; } = 6;
+}
+
 /// <summary>
 /// 右下角系统通知（AUMID + Shell_NotifyIcon 气泡，零第三方依赖）。
 /// 界面进程挂着常驻托盘时优先用托盘图标弹（不闪临时图标）；
 /// 守护进程没有托盘，走后台线程的临时图标——两条通道都要能弹，
 /// 否则"界面没开"的无人值守场景就收不到验证码/异常提醒。
+/// 自定义横幅由 App 层注册 CustomHandler；未注册（如测试/CLI）回退系统气泡。
 /// </summary>
 public static class Notify
 {
@@ -20,6 +40,30 @@ public static class Notify
 
     /// <summary>界面进程注入：返回 true 表示已派发；false 则回退到临时图标。</summary>
     public static Func<string, string, int, bool>? UiBalloon;
+
+    /// <summary>App 层注册的自绘横幅处理器（守护进程与界面进程都能用）。</summary>
+    public static Action<NotifyRequest>? CustomHandler;
+
+    public static bool Custom(NotifyRequest request)
+    {
+        try
+        {
+            var handler = CustomHandler;
+            if (handler != null)
+            {
+                handler(request);
+                return true;
+            }
+            var text = request.Message +
+                       (string.IsNullOrWhiteSpace(request.Context) ? "" : "\n" + request.Context);
+            return System(request.Title, text, Math.Max(3, request.AutoCloseSeconds));
+        }
+        catch (Exception e)
+        {
+            Log.Debug("自定义通知发送失败: {0}", e.Message);
+            return false;
+        }
+    }
 
     public static bool System(string title, string message, int timeout = 10, bool dedup = true)
     {

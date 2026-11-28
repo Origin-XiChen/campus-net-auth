@@ -477,6 +477,14 @@ public static class Daemon
                             if (Wait(listener, interval) == "STOP") return 0;
                             continue;
                         }
+                        Notify.Custom(new NotifyRequest
+                        {
+                            Kind = NotifyKind.Success,
+                            Title = "网络已连接",
+                            Message = "校园网认证成功",
+                            Context = Diagnostic(cfg),
+                            AutoCloseSeconds = 6,
+                        });
                         if (Wait(listener, interval) == "STOP") return 0;
                         continue;
                     }
@@ -500,7 +508,15 @@ public static class Daemon
                                     ["msg"] = blocked,
                                 },
                             });
-                            Notify.System("校园网需要人工认证", blocked + "\n" + Diagnostic(cfg));
+                            Notify.Custom(new NotifyRequest
+                            {
+                                Kind = NotifyKind.Error,
+                                Title = "需要人工认证",
+                                Message = blocked,
+                                Context = Diagnostic(cfg),
+                                ShowOpenSettings = true,
+                                AutoCloseSeconds = 30,
+                            });
                         }
                         var blockedWait = Math.Max(maxInterval, 1800);
                         Log.Error("按门户改造处理：{0}s 后再试一次（其间不会反复提交凭据）", blockedWait);
@@ -511,24 +527,40 @@ public static class Daemon
 
                     var msg = res.GetString("message");
                     var hint = res.GetString("_hint");
+                    var display = msg + (hint.Length > 0 ? $"（{hint}）" : "");
                     var waitFail = Math.Min(retry * failStreak, maxInterval);
                     Log.Error("登录失败: {0}{1} | 累计失败={2} | 下次重试={3}s",
                         msg, hint.Length > 0 ? $"（{hint}）" : "",
                         stats["login_fail"], waitFail);
                     EventLog.Record("login_fail", "登录失败：" + (msg.Length > 0 ? msg : hint));
 
-                    if (new[] { "PASS", "密码", "USER", "账号", "EXIST", "FORBIDDEN" }
-                        .Any(k => msg.Contains(k, StringComparison.Ordinal)))
+                    var prevMsg = (State.Load()["last_error"] as JsonObject)
+                        ?.GetString("msg") ?? "";
+                    if (display.Length > 0 && display != prevMsg)
                     {
-                        Log.Error("疑似账号/密码问题，请运行 setup 重新配置");
                         State.Update(new JsonObject
                         {
                             ["last_error"] = new JsonObject
                             {
                                 ["t"] = Utils.Now(),
-                                ["msg"] = "疑似账号/密码问题：请在「设置」重新配置账号",
+                                ["msg"] = display,
                             },
                         });
+                        Notify.Custom(new NotifyRequest
+                        {
+                            Kind = NotifyKind.Error,
+                            Title = "认证失败",
+                            Message = display,
+                            Context = Diagnostic(cfg),
+                            ShowOpenSettings = true,
+                            AutoCloseSeconds = 30,
+                        });
+                    }
+
+                    if (new[] { "PASS", "密码", "USER", "账号", "EXIST", "FORBIDDEN" }
+                        .Any(k => msg.Contains(k, StringComparison.Ordinal)))
+                    {
+                        Log.Error("疑似账号/密码问题，请运行 setup 重新配置");
                         waitFail = Math.Min(retry * 20, maxInterval);
                     }
 
@@ -606,7 +638,28 @@ public static class Daemon
                 }
                 if (command == "NOTIFY")
                 {
-                    Notify.System("校园网无感认证", "守护进程通知通道正常", 3, dedup: false);
+                    Notify.Custom(new NotifyRequest
+                    {
+                        Kind = NotifyKind.Success,
+                        Title = "通知测试",
+                        Message = "守护进程自绘横幅正常",
+                        AutoCloseSeconds = 6,
+                    });
+                    Reply(stream, "OK");
+                    continue;
+                }
+                if (command == "NOTIFYERR")
+                {
+                    // 隐藏测试指令：验证带按钮的错误卡（示例信息，不含真实账号）
+                    Notify.Custom(new NotifyRequest
+                    {
+                        Kind = NotifyKind.Error,
+                        Title = "认证失败（测试）",
+                        Message = "门户登录页已启用验证码，无法自动认证",
+                        Context = "门户 10.0.0.1:80 · 学号 1234567890 · 运营商 自动",
+                        ShowOpenSettings = true,
+                        AutoCloseSeconds = 20,
+                    });
                     Reply(stream, "OK");
                     continue;
                 }

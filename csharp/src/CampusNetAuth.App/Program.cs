@@ -21,6 +21,8 @@ internal static class Program
 
         // 安装版：数据目录在 %APPDATA%；首次启动从 exe 同目录迁移旧数据
         AppInfo.MigrateDataIfNeeded();
+        // 守护/界面进程都注册：后台也能弹自绘横幅（懒启动独立 UI 线程）
+        NotificationUi.Register();
 
         var command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
         if (command is "" or "ui") return RunUi(args);

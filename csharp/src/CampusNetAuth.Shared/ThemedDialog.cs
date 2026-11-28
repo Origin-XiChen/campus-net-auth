@@ -4,16 +4,83 @@ using System.Runtime.InteropServices;
 namespace CampusNetAuth.Ui;
 
 /// <summary>
+/// 无边框但保留 DWM 投影/圆角/系统动画的窗体基类。
+/// WS_CAPTION + WS_THICKFRAME 让 DWM 画阴影；WM_NCCALCSIZE 去掉非客户区，
+/// WM_NCHITTEST 一律回 HTCLIENT 防止用户拖边缩放（拖动由标题区触发）。
+/// </summary>
+internal class ShadowForm : Form
+{
+    private const int WmNcCalcSize = 0x0083;
+    private const int WmNcHitTest = 0x0084;
+    private const int HtClient = 1;
+    private const int WsCaption = 0x00C00000;
+    private const int WsThickFrame = 0x00040000;
+    private const int CsDropShadow = 0x20000;
+    private const int DwmwaWindowCornerPreference = 33;
+    private const int DwmwcpRound = 2;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.Style |= WsCaption | WsThickFrame;
+            cp.ClassStyle |= CsDropShadow;
+            return cp;
+        }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmNcCalcSize && m.WParam != IntPtr.Zero)
+        {
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        if (m.Msg == WmNcHitTest)
+        {
+            m.Result = (IntPtr)HtClient;
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        try
+        {
+            var pref = DwmwcpRound;
+            DwmSetWindowAttribute(Handle, DwmwaWindowCornerPreference, ref pref, sizeof(int));
+            var margins = new Margins { Left = 1, Right = 1, Top = 1, Bottom = 1 };
+            DwmExtendFrameIntoClientArea(Handle, ref margins);
+        }
+        catch
+        {
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Margins
+    {
+        public int Left, Right, Top, Bottom;
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
+}
+
+/// <summary>
 /// 与应用/安装器同风格的自绘提示窗（替代系统 MessageBox）：无边框、浅色、单一主色、
 /// 圆角 + 投影，按钮走圆角样式。主程序与安装引导器共用本文件。
 /// </summary>
-internal sealed class ThemedDialog : Form
+internal sealed class ThemedDialog : ShadowForm
 {
     private const int WmNclButtonDown = 0xA1;
     private const int HtCaption = 2;
-    private const int DwmwaWindowCornerPreference = 33;
-    private const int DwmwcpRound = 2;
-    private const int CsDropShadow = 0x20000;
 
     private static readonly Color Bg = Color.FromArgb(0xF5, 0xF5, 0xF7);
     private static readonly Color Primary = Color.FromArgb(0x00, 0x7A, 0xFF);
@@ -128,21 +195,8 @@ internal sealed class ThemedDialog : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ClassStyle |= CsDropShadow;
+            cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW：不占任务栏/Alt-Tab
             return cp;
-        }
-    }
-
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        try
-        {
-            var pref = DwmwcpRound;
-            DwmSetWindowAttribute(Handle, DwmwaWindowCornerPreference, ref pref, sizeof(int));
-        }
-        catch
-        {
         }
     }
 
@@ -225,9 +279,6 @@ internal sealed class ThemedDialog : Form
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 }
 
 /// <summary>圆角按钮：主按钮蓝底白字，次级按钮透明底灰字。</summary>
