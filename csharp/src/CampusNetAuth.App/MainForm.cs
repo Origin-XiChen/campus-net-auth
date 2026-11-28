@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
+using CampusNetAuth.Ui;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -415,9 +416,9 @@ public sealed class MainForm : Form
         {
             Log.Error("WebView2 初始化失败: {0}", e.Message);
             RevealWindow();
-            MessageBox.Show("界面组件（WebView2）初始化失败：\n" + e.Message +
-                            "\n\n请确认系统已安装 Microsoft Edge WebView2 Runtime。",
-                "校园网无感认证");
+            ThemedDialog.Error(this, "界面组件初始化失败",
+                "界面组件（WebView2）初始化失败。",
+                "请确认系统已安装 Microsoft Edge WebView2 Runtime。\n" + e.Message);
             Close();
         }
     }

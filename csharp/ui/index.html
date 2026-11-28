@@ -734,6 +734,15 @@ $('#segService').querySelectorAll('button').forEach(b => {
     b.classList.add('active');
   };
 });
+function svcLabel(v){
+  const k = String(v || 'default');
+  return {default:'校园网', DX:'电信', YD:'移动', LT:'联通', auto:'自动'}[k] || k;
+}
+function diagText(st){
+  return '门户 ' + ((st && st.host) || '—')
+       + ' · 学号 ' + ((st && st.username) || '—')
+       + ' · 运营商 ' + svcLabel(st && st.service);
+}
 function setService(v){
   curService = v || 'default';
   $('#segService').querySelectorAll('button').forEach(x =>
@@ -952,7 +961,8 @@ async function load(){
   const leEl = $('#loginErrWarn');
   if (st.last_error && st.last_error.msg) {
     leEl.textContent = '⚠ 守护登录失败：' + st.last_error.msg
-      + (st.last_error.t ? '（' + fmtClock(st.last_error.t) + '）' : '');
+      + (st.last_error.t ? '（' + fmtClock(st.last_error.t) + '）' : '')
+      + '　｜　' + diagText(st);
     leEl.style.display = 'flex';
   } else {
     leEl.style.display = 'none';
@@ -977,6 +987,12 @@ async function load(){
         + msg + '<i>' + ts + '</i></span>';
     }).join('');
     evtEl.innerHTML = '<span class="evt-cap">最近动态</span>' + items;
+    const diag = document.createElement('span');
+    diag.className = 'evt-item';
+    diag.style.color = 'var(--muted)';
+    diag.style.whiteSpace = 'normal';
+    diag.textContent = diagText(st);
+    evtEl.appendChild(diag);
     evtEl.style.display = 'flex';
     // 门户认证异常自愈（守护自动下线重登）：同步弹一次界面气泡，
     // 与系统右下角通知形成双通道；按事件时间戳去重，只弹一次
@@ -1057,7 +1073,9 @@ $('#btnConnect').onclick = async () => {
   });
   busy(false, btn);
   if (r.ok) toast(r.result === 'already_online' ? '当前已在线，无需重复认证' : '认证成功 ✓');
-  else toast('认证失败：' + (r.error || '未知错误') + (r.hint ? '（' + r.hint + '）' : ''), 4200);
+  else toast('认证失败：' + (r.error || '未知错误')
+    + (r.hint ? '（' + r.hint + '）' : '')
+    + '　｜　' + diagText(lastSt || {}), 6000);
   $('#inPass').value = '';
   load();
 };

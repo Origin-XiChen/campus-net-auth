@@ -182,6 +182,12 @@ public static class Daemon
 
     // ============================ 守护主循环 ============================
 
+    /// <summary>错误提示附带的现场信息：门户 / 学号 / 运营商，方便判断配置是否选错。</summary>
+    private static string Diagnostic(JsonObject cfg) =>
+        $"门户 {cfg.GetString("portal_host")}:{cfg.GetInt("portal_port", 80)} · " +
+        $"学号 {Utils.MaskUser(cfg.GetString("username"))} · " +
+        $"运营商 {Utils.ServiceLabel(cfg.GetString("service"))}";
+
     public static int Run(JsonObject cfg)
     {
         var listener = new TcpListener(IPAddress.Loopback, AppInfo.SingletonPort);
@@ -494,7 +500,7 @@ public static class Daemon
                                     ["msg"] = blocked,
                                 },
                             });
-                            Notify.System("校园网需要人工认证", blocked);
+                            Notify.System("校园网需要人工认证", blocked + "\n" + Diagnostic(cfg));
                         }
                         var blockedWait = Math.Max(maxInterval, 1800);
                         Log.Error("按门户改造处理：{0}s 后再试一次（其间不会反复提交凭据）", blockedWait);

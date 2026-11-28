@@ -27,4 +27,8 @@
     <EmbeddedResource Include="..\..\ui\index.html" LogicalName="CampusNetAuth.ui.index.html" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\CampusNetAuth.Shared\ThemedDialog.cs" Link="ThemedDialog.cs" />
+  </ItemGroup>
+
 </Project>

@@ -33,6 +33,17 @@ public static class Utils
         return u[..2] + new string('*', u.Length - 4) + u[^2..];
     }
 
+    /// <summary>运营商/服务的中文标签（错误提示里用于判断是否选错）。</summary>
+    public static string ServiceLabel(string? service) => (service ?? "").Trim().ToLowerInvariant() switch
+    {
+        "dx" => "电信",
+        "yd" => "移动",
+        "lt" => "联通",
+        "auto" => "自动",
+        "default" or "" => "校园网",
+        _ => service ?? "",
+    };
+
     public static string FmtUptime(double seconds)
     {
         var total = (long)Math.Max(0, seconds);

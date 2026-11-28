@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json.Nodes;
 using CampusNetAuth;
 
+using CampusNetAuth.Ui;
+
 namespace CampusNetAuth.App;
 
 internal static class ConsoleHost
@@ -53,12 +55,10 @@ internal static class Cli
         if (command is "" or "ui")
         {
             // 里程碑 4 才接 WebView2 窗口；此前给出明确提示
-            System.Windows.Forms.MessageBox.Show(
-                $"界面尚在迁移中（里程碑 4）。\n\n当前可用命令：\n" +
+            ThemedDialog.Info(null, AppInfo.AppName,
+                "界面入口由主程序接管；当前可用命令：\n" +
                 $"{AppInfo.AppName}.exe --version | status | login | logout | once | " +
-                "proxy | update | upgrade | log | test",
-                AppInfo.AppName, System.Windows.Forms.MessageBoxButtons.OK,
-                System.Windows.Forms.MessageBoxIcon.Information);
+                "proxy | update | upgrade | log | test");
             return 0;
         }
 

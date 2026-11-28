@@ -21,4 +21,8 @@
                       Condition="'$(SetupPayload)' != '' and Exists('$(SetupPayload)')" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\CampusNetAuth.Shared\ThemedDialog.cs" Link="ThemedDialog.cs" />
+  </ItemGroup>
+
 </Project>

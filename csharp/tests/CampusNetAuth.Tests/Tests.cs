@@ -389,6 +389,9 @@ public static class UtilsTests
 
         Assert.Equal("abc", Utils.Truncate("abc", 3));
         Assert.Equal("ab", Utils.Truncate("abc", 2));
+        Assert.Equal("移动", Utils.ServiceLabel("YD"));
+        Assert.Equal("校园网", Utils.ServiceLabel("default"));
+        Assert.Equal("自动", Utils.ServiceLabel("auto"));
     }
 }
 

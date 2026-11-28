@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using CampusNetAuth;
 using CampusNetAuth.App;
+using CampusNetAuth.Ui;
 
 internal static class Program
 {
@@ -28,10 +29,16 @@ internal static class Program
 
     private static int RunUi(string[] args)
     {
+        // 视觉样式要先于任何窗口（包括「界面已在运行」提示）
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.SetDefaultFont(new Font("Microsoft YaHei UI", 9F));
+
         using var mutex = new Mutex(true, "CampusNetAuth.UI", out var createdNew);
         if (!createdNew)
         {
-            MessageBox.Show("界面已在运行。", AppInfo.AppName);
+            ThemedDialog.Info(null, AppInfo.AppName, "界面已在运行。");
             return 0;
         }
 
@@ -48,10 +55,6 @@ internal static class Program
                 ["first_run_at"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
             });
         }
-
-        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
 
         using var server = new ApiServer(firstDeploy, ForeignFiles());
         var url = server.Start();

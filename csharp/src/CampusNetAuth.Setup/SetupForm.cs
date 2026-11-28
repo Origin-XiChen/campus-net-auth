@@ -1,5 +1,5 @@
-using System.ComponentModel;
 using System.Runtime.InteropServices;
+using CampusNetAuth.Ui;
 
 namespace CampusNetAuth.Setup;
 
@@ -355,8 +355,7 @@ internal sealed class SetupForm : Form
         var (valid, error) = Installer.ValidateDir(dir);
         if (valid == null)
         {
-            MessageBox.Show(this, error ?? "安装位置无效", "安装 校园网无感认证",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            ThemedDialog.Error(this, "安装位置无效", error ?? "安装位置无效");
             return;
         }
 
@@ -425,65 +424,4 @@ internal sealed class SetupForm : Form
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-}
-
-/// <summary>圆角按钮：主按钮蓝底白字，次级按钮透明底灰字。</summary>
-internal sealed class RoundButton : Button
-{
-    public enum Style
-    {
-        Primary,
-        Ghost,
-    }
-
-    [Browsable(false)]
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Style Kind { get; set; } = Style.Primary;
-
-    public RoundButton()
-    {
-        FlatStyle = FlatStyle.Flat;
-        FlatAppearance.BorderSize = 0;
-        Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
-        Cursor = Cursors.Hand;
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.OptimizedDoubleBuffer, true);
-        MouseEnter += (_, _) => Invalidate();
-        MouseLeave += (_, _) => Invalidate();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.Clear(Parent?.BackColor ?? Color.FromArgb(0xF5, 0xF5, 0xF7));
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        var rect = new Rectangle(0, 0, Width - 1, Height - 1);
-        var primary = Kind == Style.Primary;
-        var back = primary
-            ? (Enabled ? Color.FromArgb(0x00, 0x7A, 0xFF) : Color.FromArgb(0xB8, 0xD8, 0xFA))
-            : Color.Transparent;
-        if (Enabled && ClientRectangle.Contains(PointToClient(Cursor.Position)))
-            back = primary ? Color.FromArgb(0x00, 0x6F, 0xE6) : Color.FromArgb(0xE3, 0xE3, 0xEA);
-        using (var path = Rounded(rect, 8))
-        {
-            using var brush = new SolidBrush(back);
-            g.FillPath(brush, path);
-        }
-        var color = primary ? Color.White : Color.FromArgb(0x3A, 0x3A, 0x3C);
-        TextRenderer.DrawText(g, Text, Font, ClientRectangle, color,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-            TextFormatFlags.NoPadding);
-    }
-
-    private static System.Drawing.Drawing2D.GraphicsPath Rounded(Rectangle r, int radius)
-    {
-        var d = radius * 2;
-        var path = new System.Drawing.Drawing2D.GraphicsPath();
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
 }
