@@ -129,6 +129,7 @@ public static class UpdateCheck
     {
         lock (Sync)
         {
+            if (_cache == null) SeedFromState();
             if (_cache != null && !force)
             {
                 var ttl = _cache.GetBool("ok") ? SuccessTtl : FailTtl;
