@@ -115,11 +115,14 @@ python -m unittest discover -s tests   # 全量离线单测（当前 245 项，�
 
 | 改了什么 | 必须执行 |
 |---|---|
-| 任意代码 | `python -m unittest discover -s tests`（全绿） |
+| 任意 C# 代码 | `dotnet run --project csharp/tests/CampusNetAuth.Tests`（全绿） |
+| 任意 Python 代码 | `python -m unittest discover -s tests`（全绿） |
 | 任意 `.py` | `python -m py_compile campusnet.py gui_server.py desktop.py ui.py diagnose_probe.py smoke_regression.py smoke_state_write.py smoke_uninstall.py e2e_test.py` |
 | `gui_server.py` 内嵌前端 | `python check_ui.py`（JS 语法 / 标签配对 / id 引用） |
+| `csharp/ui/index.html` | JS 语法 + ID 引用校验（见 `csharp/README.md`） |
 | 协议 / 登录 / 发现 / 判定 | 新增或更新单测；必要时真机**只读**探测（绝不发凭据） |
-| 打包 / 版本 / 自启 / 升级 / 守护 | 重建 exe + `python smoke_regression.py`（全 PASS） |
+| C# 打包 / 版本 / 升级 | `csharp/build_installer.ps1` + C# 自检 + 校验 `releases.win.json` 与 nupkg 的 size/SHA1/SHA256 |
+| Python 历史线打包 / 自启 / 守护 | 重建 exe + `python smoke_regression.py`（全 PASS） |
 | 新增/修改测试、示例、文档、注释 | 无真实个人信息；MAC 用合法合成占位值；改 RSA 明文须重算黄金密文 |
 | 任意提交前 | `git diff --cached` 逐行自查；跑下方隐私扫描；确认未暂存 `probe/`、`config.json`、`state.json`、`.workbuddy/` |
 
