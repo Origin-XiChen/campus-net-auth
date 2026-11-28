@@ -975,7 +975,8 @@ async function load(){
   }
   // 守护最近一次致命登录失败（last_error，成功后自动清除）
   const leEl = $('#loginErrWarn');
-  if (st.last_error && st.last_error.msg) {
+  // 已认证时不再展示历史登录失败（守护会在恢复在线时清掉状态，这里做一层兜底）
+  if (st.last_error && st.last_error.msg && !st.info) {
     leEl.textContent = '⚠ 守护登录失败：' + st.last_error.msg
       + (st.last_error.t ? '（' + fmtClock(st.last_error.t) + '）' : '')
       + '　｜　' + diagText(st);
@@ -985,7 +986,9 @@ async function load(){
   }
   // 最近状态事件（掉线/重连/恢复/登录结果/门户异常自愈）即时展示，最多 3 条
   const evtEl = $('#evtBar');
-  const evts = st.events || [];
+  // 已认证时过滤掉历史的失败/验证码事件，避免看起来像当前仍有问题
+  const evts = (st.events || []).filter(e =>
+    !(st.info && (e.kind === 'login_fail' || e.kind === 'blocked')));
   if (evts.length){
     const EVT_CLS = {lost:'err', restored:'ok', offline:'warn',
                      login_ok:'ok', login_fail:'err', kickout:'warn',

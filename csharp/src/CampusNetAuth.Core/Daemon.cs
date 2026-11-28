@@ -188,6 +188,38 @@ public static class Daemon
         $"学号 {Utils.MaskUser(cfg.GetString("username"))} · " +
         $"运营商 {Utils.ServiceLabel(cfg.GetString("service"))}";
 
+    /// <summary>确认在线/登录成功后清掉历史失败标记与失败事件，避免界面一直挂着旧警告。</summary>
+    public static void ClearAuthIssues()
+    {
+        try
+        {
+            var st = State.Load();
+            var hasError = st["last_error"] != null;
+            var events = st["events"] as JsonArray;
+            var hasBad = events != null && events.Any(e => e is JsonObject o &&
+                (o.GetString("kind") == "login_fail" || o.GetString("kind") == "blocked"));
+            if (!hasError && !hasBad) return;
+            State.Mutate(s =>
+            {
+                s.Remove("last_error");
+                if (s["events"] is JsonArray arr)
+                {
+                    for (var i = arr.Count - 1; i >= 0; i--)
+                    {
+                        if (arr[i] is JsonObject e &&
+                            e.GetString("kind") is "login_fail" or "blocked")
+                            arr.RemoveAt(i);
+                    }
+                }
+            });
+            Log.Info("认证已恢复：已清除历史登录错误与失败事件");
+        }
+        catch (Exception e)
+        {
+            Log.Debug("清理历史登录错误失败: {0}", e.Message);
+        }
+    }
+
     public static int Run(JsonObject cfg)
     {
         var listener = new TcpListener(IPAddress.Loopback, AppInfo.SingletonPort);
@@ -271,6 +303,7 @@ public static class Daemon
             var prevOnline = (bool?)null;
             var pauseLogged = 0L;
             var blockedReason = "";
+            var authClean = false;
 
             while (true)
             {
@@ -333,6 +366,11 @@ public static class Daemon
 
                     if (online == true)
                     {
+                        if (!authClean)
+                        {
+                            ClearAuthIssues();
+                            authClean = true;
+                        }
                         if (failStreak > 0) Log.Info("网络已恢复");
                         failStreak = 0;
                         staleStreak = 0;
@@ -432,6 +470,8 @@ public static class Daemon
                     if (res.GetString("result") == "success")
                     {
                         Bump("login_ok");
+                        ClearAuthIssues();
+                        authClean = true;
                         if (failStreak > 0)
                         {
                             Bump("reconnects");
@@ -492,6 +532,7 @@ public static class Daemon
                     // ---- 登录失败 ----
                     Bump("login_fail");
                     failStreak++;
+                    authClean = false;
                     var blocked = res.GetString("_blocked");
                     if (blocked.Length > 0)
                     {
