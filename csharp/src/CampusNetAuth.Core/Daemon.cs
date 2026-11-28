@@ -9,9 +9,6 @@ namespace CampusNetAuth;
 /// <summary>守护进程：单例端口、控制通道（STOP/CHECK/VER/NOTIFY）、认证循环。</summary>
 public static class Daemon
 {
-    // 版本提示展示时间：20s 内不再弹「网络已连接」，避免同位置互相顶掉
-    private static long _updateNoticeAt;
-
     public static bool IsRunning()
     {
         try
@@ -216,7 +213,6 @@ public static class Daemon
                     ["update_notice_version"] = latest,
                     ["update_notice_at"] = Utils.Now(),
                 });
-                Interlocked.Exchange(ref _updateNoticeAt, Environment.TickCount64);
                 Notify.Custom(new NotifyRequest
                 {
                     Kind = NotifyKind.Success,
@@ -372,13 +368,6 @@ public static class Daemon
                 {
                     stats["loops"]++;
 
-                    var updateTick = Environment.TickCount64 / 1000.0;
-                    if (lastUpdateCheck == null || updateTick - lastUpdateCheck >= 6 * 3600)
-                    {
-                        lastUpdateCheck = updateTick;
-                        CheckUpdateNoticeAsync();
-                    }
-
                     if (!portalOk)
                     {
                         if (!client.PortalReachable())
@@ -439,6 +428,15 @@ public static class Daemon
                             ClearAuthIssues();
                             authClean = true;
                         }
+
+                        // 联网/认证成功后再做版本检测（没有网络不可能查到更新）
+                        var updateNow = Environment.TickCount64 / 1000.0;
+                        if (lastUpdateCheck == null || updateNow - lastUpdateCheck >= 6 * 3600)
+                        {
+                            lastUpdateCheck = updateNow;
+                            CheckUpdateNoticeAsync();
+                        }
+
                         if (failStreak > 0) Log.Info("网络已恢复");
                         failStreak = 0;
                         staleStreak = 0;
@@ -585,18 +583,14 @@ public static class Daemon
                             if (Wait(listener, interval) == "STOP") return 0;
                             continue;
                         }
-                        var noticeAt = Interlocked.Read(ref _updateNoticeAt);
-                        if (noticeAt == 0 || Environment.TickCount64 - noticeAt >= 20_000)
+                        Notify.Custom(new NotifyRequest
                         {
-                            Notify.Custom(new NotifyRequest
-                            {
-                                Kind = NotifyKind.Success,
-                                Title = "网络已连接",
-                                Message = "校园网认证成功",
-                                Context = Diagnostic(cfg),
-                                AutoCloseSeconds = 6,
-                            });
-                        }
+                            Kind = NotifyKind.Success,
+                            Title = "网络已连接",
+                            Message = "校园网认证成功",
+                            Context = Diagnostic(cfg),
+                            AutoCloseSeconds = 6,
+                        });
                         if (Wait(listener, interval) == "STOP") return 0;
                         continue;
                     }
