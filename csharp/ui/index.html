@@ -118,8 +118,57 @@ input{font-family:inherit;font-size:inherit}
 }
 .card-title{font-size:14.5px;font-weight:700;letter-spacing:.1px}
 .card-sub{font-size:12px;color:var(--muted);margin-top:5px}
+.card-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.card-head{display:flex;align-items:flex-start;justify-content:space-between;
+  gap:16px}
+.card-head-main{min-width:0}
+.card-head .btn-row{flex-shrink:0}
+.card-head .switch{margin-top:2px}
 .page-title{font-size:21px;font-weight:700;letter-spacing:.2px;
   padding:2px 2px 15px}
+.page-head{display:flex;align-items:flex-end;justify-content:space-between;
+  gap:16px;padding:2px 2px 15px}
+.page-head .page-title{padding:0}
+.page-sub{font-size:12px;color:var(--muted);padding-bottom:3px}
+.page-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:16px;align-items:start}
+.page-grid>.card{margin-bottom:0}
+.card-wide{grid-column:1/-1}
+
+/* ---------- 折叠区（高级项） ---------- */
+.fold-inline{margin-top:16px;border-top:1px solid var(--border);
+  padding-top:13px}
+.fold-inline>summary{list-style:none;display:flex;align-items:center;
+  cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
+  user-select:none}
+.fold-inline>summary::-webkit-details-marker{display:none}
+.fold-inline>summary::after{content:"展开";margin-left:auto;
+  font-size:11px;font-weight:500;color:var(--muted2)}
+.fold-inline[open]>summary::after{content:"收起"}
+.fold-inline .field{margin-top:12px}
+.fold{padding:0}
+.fold>summary{list-style:none;display:flex;align-items:center;gap:10px;
+  padding:18px 22px;cursor:pointer;user-select:none}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary .card-sub{margin-top:0}
+.fold>summary::after{content:"展开";margin-left:auto;font-size:11.5px;
+  color:var(--muted2)}
+.fold[open]>summary::after{content:"收起"}
+.fold-body{padding:0 22px 20px}
+.field-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+  gap:14px 16px}
+.field-grid .field{margin-top:0}
+.tools-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;
+  margin-top:14px}
+.tools-grid .btn{width:100%;padding:9px 10px}
+.tools-foot{display:flex;align-items:center;gap:10px;margin-top:12px;
+  flex-wrap:wrap}
+.setting-row{display:flex;align-items:center;justify-content:space-between;
+  gap:16px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+@media (max-width:900px){
+  .page-grid{grid-template-columns:1fr}
+  .card-wide{grid-column:auto}
+}
 
 /* ---------- 表单 ---------- */
 .field{margin-top:16px}
@@ -381,199 +430,221 @@ input{font-family:inherit;font-size:inherit}
       </div>
       <!-- 连接与账号 -->
       <section class="page active" id="page-conn">
-        <div class="page-title">校园网自动认证</div>
-        <div class="card">
-          <div class="card-title">认证信息</div>
-          <div class="card-sub">修改后点击「保存并连接」立即生效并尝试认证</div>
-          <div class="field">
-            <div class="label">门户地址</div>
-            <input class="input" id="inHost" placeholder="172.16.54.18:80">
-          </div>
-          <div class="field">
-            <div class="label">运营商</div>
-            <div class="seg" id="segService">
-              <button data-v="default">校园网</button>
-              <button data-v="DX">电信</button>
-              <button data-v="YD">移动</button>
-              <button data-v="LT">联通</button>
-              <button data-v="auto">自动</button>
+        <div class="page-head">
+          <div class="page-title">连接与账号</div>
+          <div class="page-sub">保存后立即尝试认证；配置与凭据只保存在本机</div>
+        </div>
+        <div class="page-grid">
+          <div class="card">
+            <div class="card-title">校园网账号</div>
+            <div class="card-sub">密码使用 Windows DPAPI 加密保存，仅当前 Windows 用户可解密</div>
+            <div class="field">
+              <div class="label">账号（学号）</div>
+              <input class="input" id="inUser" placeholder="请输入学号">
+            </div>
+            <div class="field">
+              <div class="label">密码</div>
+              <input class="input" id="inPass" type="password"
+                     placeholder="留空表示不修改">
+            </div>
+            <div class="btn-row" style="margin-top:20px">
+              <button class="btn btn-primary" id="btnConnect">保存并连接</button>
+              <button class="btn btn-danger" id="btnLogout">下线</button>
             </div>
           </div>
-          <div class="field">
-            <div class="label">账号（学号）</div>
-            <input class="input" id="inUser" placeholder="请输入学号">
-          </div>
-          <div class="field">
-            <div class="label">密码</div>
-            <input class="input" id="inPass" type="password"
-                   placeholder="留空表示不修改（Windows DPAPI 加密保存）">
-          </div>
-          <div class="btn-row" style="margin-top:20px">
-            <button class="btn btn-primary" id="btnConnect">保存并连接</button>
-            <button class="btn btn-danger" id="btnLogout">下线</button>
+
+          <div class="card">
+            <div class="card-title">网络与运营商</div>
+            <div class="card-sub">运营商选错时，门户会误报欠费、验证码或密码错误</div>
+            <div class="field">
+              <div class="label">运营商</div>
+              <div class="seg" id="segService">
+                <button data-v="default">校园网</button>
+                <button data-v="DX">电信</button>
+                <button data-v="YD">移动</button>
+                <button data-v="LT">联通</button>
+                <button data-v="auto">自动</button>
+              </div>
+            </div>
+            <div class="field">
+              <div class="label">门户地址</div>
+              <input class="input" id="inHost" placeholder="172.16.54.18:80">
+            </div>
+            <div class="hint">一般无需修改；自动发现失败时再手动填写 host:port</div>
           </div>
         </div>
       </section>
 
       <!-- 自动化 -->
       <section class="page" id="page-auto">
-        <div class="card">
-          <div class="card-title">工具箱</div>
-          <div class="card-sub">一键自检 · 体检 · 自启管理 · 抓取诊断 · 通知测试（原 .bat 已全部内置）</div>
-          <div class="btn-row" style="margin-top:16px">
-            <button class="btn btn-primary" id="btnSelfTest">自检</button>
-            <button class="btn btn-primary" id="btnHealth">一键体检</button>
-            <button class="btn btn-ghost" id="btnOpenDir">打开目录</button>
-          </div>
-          <div class="btn-row" style="margin-top:10px">
-            <button class="btn btn-ghost" id="btnDiagnose">抓取诊断</button>
-            <button class="btn btn-ghost" id="btnNotifyTest">通知测试</button>
-            <span class="hint">登录 Windows 即自动守护，全程无窗口</span>
-          </div>
+        <div class="page-head">
+          <div class="page-title">自动化与维护</div>
+          <div class="page-sub">守护、更新与系统行为集中在这里；日常无需改动</div>
         </div>
-
-        <div class="card">
-          <div class="card-title">后台守护</div>
-          <div class="card-sub">仅当处于校园网且检测到未认证时才自动登录</div>
-          <div class="daemon-line" style="margin-top:14px">
-            <span id="daemonState">○ 已停止</span>
-          </div>
-          <div class="hint" id="daemonCompHint" style="margin-top:6px"></div>
-          <div class="hint" style="margin-top:4px">
-            升级提示：守护运行时程序文件被系统锁定，手动替换会失败——
-            把新版本文件放进本目录后用上方「立即升级」即可（会自动停守护并换文件）
-          </div>
-          <div class="warn-bar" id="daemonWarn" style="display:none;margin-top:10px">
-            <span>开机自启已启用，但守护未在运行</span>
-            <button class="btn btn-primary" id="btnDStart2" style="flex-shrink:0;margin-left:auto">立即启动</button>
-          </div>
-          <!-- 守护版本陈旧：换 exe 后老守护仍在跑旧代码，新功能不会生效 -->
-          <div class="warn-bar info" id="daemonStaleWarn"
-               style="display:none;margin-top:10px">
-            <span id="daemonStaleText"></span>
-            <button class="btn btn-primary" id="btnDRefresh"
-                    style="flex-shrink:0;margin-left:auto">重启守护以生效</button>
-          </div>
-          <!-- 程序目录里发现了更高版本的 exe -->
-          <div class="warn-bar" id="upgradeWarn"
-               style="display:none;margin-top:10px">
-            <span id="upgradeText"></span>
-            <button class="btn btn-primary" id="btnUpgrade"
-                    style="flex-shrink:0;margin-left:auto">立即升级</button>
-          </div>
-          <!-- GitHub 上有更新版本：只提示并打开发布页，不自动下载替换 -->
-          <div class="warn-bar info" id="remoteUpdateWarn"
-               style="display:none;margin-top:10px">
-            <span id="remoteUpdateText"></span>
-            <button class="btn btn-primary" id="btnOpenRelease2"
-                    style="flex-shrink:0;margin-left:auto">打开发布页</button>
-          </div>
-          <div class="warn-bar err" id="loginErrWarn" style="display:none;margin-top:10px"></div>
-          <div class="warn-bar err" id="autostartWarn" style="display:none;margin-top:10px"></div>
-          <div class="evt-bar" id="evtBar" style="display:none;margin-top:10px"></div>
-          <div class="btn-row" style="margin-top:14px">
-            <button class="btn btn-primary" id="btnDStart">启动守护</button>
-            <button class="btn btn-ghost" id="btnDStop">停止守护</button>
-            <button class="btn btn-ghost" id="btnDRestart">重启守护</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">自动认证</div>
-          <div class="row" style="margin-top:16px;justify-content:space-between">
-            <div>
-              <div style="font-size:13px;font-weight:600">开机后自动认证</div>
-              <div class="card-sub" style="margin-top:4px">写入开机自启并拉起后台守护，由同一个 exe 完成</div>
-            </div>
-            <div class="switch" id="swAuto"></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">系统代理守卫</div>
-          <div class="card-sub">
-            开机前若开着代理（梯子），开机后系统代理仍是开着的状态——节点在未认证的
-            校园网里连不上，就会"什么网页都打不开"。开启后：检测到系统代理先自动关闭，
-            再走认证。
-          </div>
-          <div class="row" style="margin-top:16px;justify-content:space-between">
-            <div>
-              <div style="font-size:13px;font-weight:600">认证前自动关闭系统代理</div>
-              <div class="card-sub" style="margin-top:4px">
-                只关 Windows 系统代理与 PAC，不结束代理软件进程；认证成功后不自动恢复
+        <div class="page-grid">
+          <div class="card card-wide">
+            <div class="card-head">
+              <div class="card-head-main">
+                <div class="card-title-row">
+                  <span class="card-title">后台守护</span>
+                  <span class="comp-state" id="serviceState">—</span>
+                </div>
+                <div class="card-sub">仅当处于校园网且检测到未认证时才自动登录</div>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-primary" id="btnDStart">启动守护</button>
+                <button class="btn btn-ghost" id="btnDStop">停止守护</button>
+                <button class="btn btn-ghost" id="btnDRestart">重启守护</button>
               </div>
             </div>
-            <div class="switch" id="swProxyGuard"></div>
-          </div>
-          <div class="comp-row" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
-            <div class="comp-info">
-              <div class="comp-name">当前系统代理</div>
-              <div class="comp-sub" id="proxyDetail">—</div>
+            <div class="daemon-line" style="margin-top:12px">
+              <span id="daemonState">○ 已停止</span>
+              <span class="hint" id="daemonCompHint"></span>
             </div>
-            <span class="comp-state" id="proxyState">—</span>
+            <div class="warn-bar" id="daemonWarn" style="display:none;margin-top:10px">
+              <span>开机自启已启用，但守护未在运行</span>
+              <button class="btn btn-primary" id="btnDStart2" style="flex-shrink:0;margin-left:auto">立即启动</button>
+            </div>
+            <!-- 守护版本陈旧：换 exe 后老守护仍在跑旧代码，新功能不会生效 -->
+            <div class="warn-bar info" id="daemonStaleWarn"
+                 style="display:none;margin-top:10px">
+              <span id="daemonStaleText"></span>
+              <button class="btn btn-primary" id="btnDRefresh"
+                      style="flex-shrink:0;margin-left:auto">重启守护以生效</button>
+            </div>
+            <div class="warn-bar err" id="loginErrWarn" style="display:none;margin-top:10px"></div>
+            <div class="warn-bar err" id="autostartWarn" style="display:none;margin-top:10px"></div>
+            <div class="evt-bar" id="evtBar" style="display:none;margin-top:10px"></div>
+            <div class="setting-row">
+              <div>
+                <div style="font-size:13px;font-weight:600">开机自启</div>
+                <div class="card-sub" style="margin-top:4px">登录 Windows 后自动拉起守护；关闭不影响当前会话</div>
+              </div>
+              <div class="switch" id="swAuto"></div>
+            </div>
           </div>
-          <div class="btn-row" style="margin-top:12px">
-            <button class="btn btn-ghost" id="btnProxyOff">立即关闭代理</button>
-            <button class="btn btn-ghost" id="btnProxyRestore">恢复关闭前的设置</button>
-            <span class="hint" id="proxyBackupHint"></span>
-          </div>
-        </div>
 
-        <div class="card">
-          <div class="card-title">程序维护</div>
-          <div class="card-sub">自启、守护、界面由同一个 exe 承担，无需安装额外组件</div>
-          <div class="comp-row">
-            <div class="comp-info">
-              <div class="comp-name">一体化后台服务</div>
-              <div class="comp-sub">开机自启直接运行本程序 · 守护进程即同一个 exe</div>
+          <div class="card card-wide">
+            <div class="card-head">
+              <div class="card-head-main">
+                <div class="card-title-row">
+                  <span class="card-title">版本更新</span>
+                  <span class="comp-state" id="updateState">—</span>
+                </div>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-ghost" id="btnUpdateCheck">检查更新</button>
+                <button class="btn btn-primary" id="btnUpdateInstall" style="display:none">下载并升级</button>
+                <button class="btn btn-ghost" id="btnOpenRelease" style="display:none">打开发布页</button>
+              </div>
             </div>
-            <span class="comp-state" id="serviceState">—</span>
-          </div>
-          <div class="comp-row">
-            <div class="comp-info">
-              <div class="comp-name">版本更新</div>
-              <div class="comp-sub" id="updateSub">自动检查 GitHub Release（只检查，不下载）</div>
+            <div class="card-sub" id="updateSub">自动检查 GitHub Release（只检查，不下载）</div>
+            <div class="update-progress" id="updateProgress" style="display:none">
+              <div class="update-bar"><i id="updateBar"></i></div>
+              <div class="update-meta">
+                <span id="updatePct">0%</span>
+                <span id="updateSpeed"></span>
+                <span id="updateBytes"></span>
+              </div>
             </div>
-            <span class="comp-state" id="updateState">—</span>
-            <button class="btn btn-ghost" id="btnUpdateCheck" style="flex-shrink:0">检查更新</button>
-            <button class="btn btn-primary" id="btnUpdateInstall" style="flex-shrink:0;display:none">下载并升级</button>
-            <button class="btn btn-ghost" id="btnOpenRelease" style="flex-shrink:0;display:none">打开发布页</button>
-          </div>
-          <div class="update-progress" id="updateProgress" style="display:none">
-            <div class="update-bar"><i id="updateBar"></i></div>
-            <div class="update-meta">
-              <span id="updatePct">0%</span>
-              <span id="updateSpeed"></span>
-              <span id="updateBytes"></span>
+            <!-- 程序目录里发现了更高版本的 exe -->
+            <div class="warn-bar" id="upgradeWarn"
+                 style="display:none;margin-top:10px">
+              <span id="upgradeText"></span>
+              <button class="btn btn-primary" id="btnUpgrade"
+                      style="flex-shrink:0;margin-left:auto">立即升级</button>
             </div>
-          </div>
-          <div class="comp-row">
-            <div class="comp-info">
-              <div class="comp-name">彻底卸载本程序</div>
-              <div class="comp-sub" id="uninsSub">打开同目录的 <b>CampusNetAuthUninstall.exe</b>：停守护 → 删自启 → 清空本目录全部产物与缓存</div>
+            <!-- GitHub 上有更新版本：只提示并打开发布页，不自动下载替换 -->
+            <div class="warn-bar info" id="remoteUpdateWarn"
+                 style="display:none;margin-top:10px">
+              <span id="remoteUpdateText"></span>
+              <button class="btn btn-primary" id="btnOpenRelease2"
+                      style="flex-shrink:0;margin-left:auto">打开发布页</button>
             </div>
-            <span class="comp-state" id="compUninsState">—</span>
-            <button class="btn btn-danger" id="btnPurge" style="flex-shrink:0">彻底卸载</button>
+            <details class="fold-inline">
+              <summary>手动替换 exe 的注意事项</summary>
+              <div class="hint">守护运行时程序文件被系统锁定，直接覆盖会失败。
+                把新版本 exe 放进程序目录后，点上方提示条里的「立即升级」即可自动停守护并换文件。</div>
+            </details>
           </div>
-          <div class="hint" style="margin-top:12px">配置 / 凭据 / 状态保存在数据目录（安装版为 %APPDATA%\CampusNetAuth），首次运行自动生成；卸载默认保留，重装后免配置</div>
-        </div>
 
-        <div class="card">
-          <div class="card-title">检测参数</div>
-          <div class="card-sub">留空则保持原值</div>
-          <div class="field"><div class="label">在线检测周期（秒）</div>
-            <input class="input" id="inInterval" style="max-width:160px"></div>
-          <div class="field"><div class="label">离线检测周期（秒）</div>
-            <input class="input" id="inOffline" style="max-width:160px"></div>
-          <div class="field"><div class="label">失败重试间隔（秒）</div>
-            <input class="input" id="inRetry" style="max-width:160px"></div>
-          <div class="field"><div class="label">最长退避间隔（秒）</div>
-            <input class="input" id="inMax" style="max-width:160px"></div>
-          <div class="field"><div class="label">单次请求超时（秒）</div>
-            <input class="input" id="inTimeout" style="max-width:160px"></div>
-          <div class="btn-row" style="margin-top:18px">
-            <button class="btn btn-primary" id="btnSaveAuto">保存设置</button>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-head-main">
+                <div class="card-title">系统代理守卫</div>
+                <div class="card-sub">开机前若开着代理，认证前会先关闭系统代理与 PAC，
+                  避免节点连不上导致网页打不开</div>
+              </div>
+              <div class="switch" id="swProxyGuard"></div>
+            </div>
+            <div class="comp-row" style="margin-top:12px">
+              <div class="comp-info">
+                <div class="comp-name">当前系统代理</div>
+                <div class="comp-sub" id="proxyDetail">—</div>
+              </div>
+              <span class="comp-state" id="proxyState">—</span>
+            </div>
+            <div class="btn-row" style="margin-top:12px">
+              <button class="btn btn-ghost" id="btnProxyOff">立即关闭代理</button>
+              <button class="btn btn-ghost" id="btnProxyRestore">恢复关闭前的设置</button>
+            </div>
+            <div class="hint" id="proxyBackupHint" style="margin-top:8px"></div>
           </div>
+
+          <div class="card">
+            <div class="card-title">工具箱</div>
+            <div class="card-sub">原 .bat 已全部内置；一键体检会短暂断网</div>
+            <div class="tools-grid">
+              <button class="btn btn-primary" id="btnSelfTest">自检</button>
+              <button class="btn btn-primary" id="btnHealth">一键体检</button>
+              <button class="btn btn-ghost" id="btnDiagnose">抓取诊断</button>
+              <button class="btn btn-ghost" id="btnNotifyTest">通知测试</button>
+            </div>
+            <div class="tools-foot">
+              <button class="btn btn-ghost" id="btnOpenDir">打开程序目录</button>
+              <span class="hint">密码与日志都不出本机</span>
+            </div>
+          </div>
+
+          <div class="card card-wide">
+            <div class="card-head">
+              <div class="card-head-main">
+                <div class="card-title">彻底卸载</div>
+                <div class="card-sub" id="uninsSub">打开同目录的 <b>CampusNetAuthUninstall.exe</b>：
+                  停守护 → 删自启 → 清空本目录全部产物与缓存</div>
+              </div>
+              <div class="btn-row">
+                <span class="comp-state" id="compUninsState">—</span>
+                <button class="btn btn-danger" id="btnPurge">彻底卸载</button>
+              </div>
+            </div>
+            <div class="hint" style="margin-top:8px">配置 / 凭据 / 状态保存在数据目录
+              （安装版为 %APPDATA%\CampusNetAuth），卸载默认保留，重装后免配置</div>
+          </div>
+
+          <details class="card card-wide fold">
+            <summary>
+              <span class="card-title">检测参数</span>
+              <span class="card-sub">高级选项 · 留空则保持原值</span>
+            </summary>
+            <div class="fold-body">
+              <div class="field-grid">
+                <div class="field"><div class="label">在线检测周期（秒）</div>
+                  <input class="input" id="inInterval"></div>
+                <div class="field"><div class="label">离线检测周期（秒）</div>
+                  <input class="input" id="inOffline"></div>
+                <div class="field"><div class="label">失败重试间隔（秒）</div>
+                  <input class="input" id="inRetry"></div>
+                <div class="field"><div class="label">最长退避间隔（秒）</div>
+                  <input class="input" id="inMax"></div>
+                <div class="field"><div class="label">单次请求超时（秒）</div>
+                  <input class="input" id="inTimeout"></div>
+              </div>
+              <div class="btn-row" style="margin-top:16px">
+                <button class="btn btn-primary" id="btnSaveAuto">保存设置</button>
+              </div>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -1352,7 +1423,7 @@ $('#btnUpgrade').onclick = () => {
 $('#btnSelfTest').onclick = () => withTask('/api/self-test', $('#btnSelfTest'), '自检中…', '自检');
 $('#btnHealth').onclick = () => {
   if (!lastSt || !lastSt.daemon){
-    toast('体检需要后台守护配合，请先在下方点「启动守护」', 3600);
+    toast('体检需要后台守护配合，请先在「后台守护」卡片启动守护', 3600);
     return;
   }
   confirmDialog({
