@@ -939,12 +939,15 @@ async function openUpdateDialog(upd){
   $('#updateNow').disabled = false;
   $('#updateLater').disabled = false;
   $('#updateNow').textContent = '立即更新';
+  mask.dataset.busy = '';
   mask.classList.add('show');
   $('#updateLater').onclick = () => {
+    if (mask.dataset.busy === '1') return;
     mask.classList.remove('show');
     sessionStorage.setItem('cnaUpdateLater', upd.latest);
   };
-  mask.onclick = (e) => { if (e.target === mask) $('#updateLater').onclick(); };
+  // 更新弹窗只能通过「稍后」关闭：点遮罩/其他区域不再误关，避免下载被藏到后台
+  mask.onclick = null;
   $('#updateNow').onclick = () => startModalUpdate(upd);
   try{
     const r = await api('/api/update/notes?version=' + encodeURIComponent(upd.latest));
@@ -973,6 +976,8 @@ function maybePromptUpdate(st){
   openUpdateDialog(upd);
 }
 async function startModalUpdate(upd){
+  const mask = $('#updateMask');
+  mask.dataset.busy = '1';
   $('#updateNow').disabled = true;
   $('#updateLater').disabled = true;
   $('#updateNow').innerHTML = '<span class="spin"></span>下载中…';
@@ -986,6 +991,7 @@ async function startModalUpdate(upd){
     status.className = 'update-status show ' + (ok ? 'ok' : 'err');
   };
   const fail = (text) => {
+    mask.dataset.busy = '';
     setStatus(text, false);
     $('#updateNow').disabled = false;
     $('#updateLater').disabled = false;

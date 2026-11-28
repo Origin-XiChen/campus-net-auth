@@ -15,6 +15,7 @@ internal static class VelopackUpdater
     private const long SuccessTtl = 6 * 3600;
     private const long FailTtl = 300;
     private static int _checking;
+    private static int _applying;
 
     private sealed class ProgressState
     {
@@ -205,41 +206,51 @@ internal static class VelopackUpdater
     public static string DownloadAndApply()
     {
         if (!AppInfo.IsInstalled) return "开发态不支持内置更新";
+        // UI 弹窗被误关后可能重复点「下载」，同一进程只允许一个 Velopack 操作
+        if (Interlocked.CompareExchange(ref _applying, 1, 0) != 0)
+            return "更新已在进行中，请稍候…";
         try
         {
-            var mgr = Manager();
-            var update = mgr.CheckForUpdatesAsync().GetAwaiter().GetResult();
-            if (update == null) return "已是最新版本";
-            var total = update.TargetFullRelease.Size;
-            var clock = Stopwatch.StartNew();
-            long lastBytes = 0;
-            var lastMs = 0.0;
-            var speed = 0.0;
-            SetProgress(0, total, 0, 0, "下载中");
-            mgr.DownloadUpdates(update, pct =>
+            try
             {
-                var ms = clock.Elapsed.TotalMilliseconds;
-                var bytes = total > 0 ? total * Math.Clamp(pct, 0, 100) / 100 : 0;
-                if (ms - lastMs >= 250)
+                var mgr = Manager();
+                var update = mgr.CheckForUpdatesAsync().GetAwaiter().GetResult();
+                if (update == null) return "已是最新版本";
+                var total = update.TargetFullRelease.Size;
+                var clock = Stopwatch.StartNew();
+                long lastBytes = 0;
+                var lastMs = 0.0;
+                var speed = 0.0;
+                SetProgress(0, total, 0, 0, "下载中");
+                mgr.DownloadUpdates(update, pct =>
                 {
-                    var inst = (bytes - lastBytes) * 1000.0 / Math.Max(1, ms - lastMs);
-                    speed = speed <= 0 ? inst : speed * 0.7 + inst * 0.3;
-                    lastBytes = bytes;
-                    lastMs = ms;
-                    SetProgress(pct, total, bytes, speed, "下载中");
-                }
-            });
-            SetProgress(100, total, total, speed, "校验安装");
-            Log.Info("更新包已下载，准备重启应用：v{0}", update.TargetFullRelease.Version);
-            SetProgress(100, total, total, speed, "正在重启");
-            mgr.ApplyUpdatesAndRestart(update.TargetFullRelease);
-            return "更新已下载，正在重启应用";
+                    var ms = clock.Elapsed.TotalMilliseconds;
+                    var bytes = total > 0 ? total * Math.Clamp(pct, 0, 100) / 100 : 0;
+                    if (ms - lastMs >= 250)
+                    {
+                        var inst = (bytes - lastBytes) * 1000.0 / Math.Max(1, ms - lastMs);
+                        speed = speed <= 0 ? inst : speed * 0.7 + inst * 0.3;
+                        lastBytes = bytes;
+                        lastMs = ms;
+                        SetProgress(pct, total, bytes, speed, "下载中");
+                    }
+                });
+                SetProgress(100, total, total, speed, "校验安装");
+                Log.Info("更新包已下载，准备重启应用：v{0}", update.TargetFullRelease.Version);
+                SetProgress(100, total, total, speed, "正在重启");
+                mgr.ApplyUpdatesAndRestart(update.TargetFullRelease);
+                return "更新已下载，正在重启应用";
+            }
+            catch (Exception e)
+            {
+                Log.Error("Velopack 更新失败: {0}", e.Message);
+                SetProgress(0, 0, 0, 0, "失败");
+                return "更新失败：" + e.Message;
+            }
         }
-        catch (Exception e)
+        finally
         {
-            Log.Error("Velopack 更新失败: {0}", e.Message);
-            SetProgress(0, 0, 0, 0, "失败");
-            return "更新失败：" + e.Message;
+            Interlocked.Exchange(ref _applying, 0);
         }
     }
 

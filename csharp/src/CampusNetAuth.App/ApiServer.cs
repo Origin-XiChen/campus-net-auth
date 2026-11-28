@@ -204,9 +204,10 @@ public sealed class ApiServer : IDisposable
             case "/api/update/install":
                 return JsonResponse(new JsonObject
                 {
+                    // 下载任务只保留一个：弹窗重开/重复点击时复用同一次下载，避免 Velopack 锁冲突
                     ["id"] = AppInfo.IsInstalled
-                        ? StartTask(VelopackUpdater.DownloadAndApply, "update_install")
-                        : StartTask(UpdateInstallTask, "update_install"),
+                        ? StartTask(VelopackUpdater.DownloadAndApply, "update_install", reuseRunning: true)
+                        : StartTask(UpdateInstallTask, "update_install", reuseRunning: true),
                 });
             case "/api/upgrade/apply":
                 return JsonResponse(new JsonObject { ["id"] = StartTask(UpgradeTask, "upgrade") });
@@ -490,11 +491,24 @@ public sealed class ApiServer : IDisposable
     }
 
     // ---------- 任务 ----------
-    private string StartTask(Func<string> work, string name)
+    private string StartTask(Func<string> work, string name, bool reuseRunning = false)
     {
-        var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();
-        var entry = new TaskEntry { Kind = name };
-        lock (_lock) _tasks[id] = entry;
+        string id;
+        TaskEntry entry;
+        lock (_lock)
+        {
+            if (reuseRunning)
+            {
+                foreach (var (existingId, existing) in _tasks)
+                {
+                    if (existing.Status == "running" && existing.Kind == name)
+                        return existingId;
+                }
+            }
+            id = Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();
+            entry = new TaskEntry { Kind = name };
+            _tasks[id] = entry;
+        }
         Task.Run(() =>
         {
             try
