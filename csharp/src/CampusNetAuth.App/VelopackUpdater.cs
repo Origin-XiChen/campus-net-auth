@@ -63,6 +63,11 @@ internal static class VelopackUpdater
         var changed = !string.Equals(result.GetString("current"), AppInfo.Version,
             StringComparison.OrdinalIgnoreCase);
         result["current"] = AppInfo.Version;
+        if (latest.Length == 0 && result.GetBool("ok"))
+        {
+            result["latest"] = AppInfo.Version;
+            result["name"] = AppInfo.AppName + " " + AppInfo.Version;
+        }
         if (changed)
             result["available"] = latest.Length > 0 && VersionNewer(latest, AppInfo.Version);
         return result;
@@ -111,7 +116,8 @@ internal static class VelopackUpdater
         if (!force && cached != null && Fresh(cached)) return Normalize(cached);
 
         var (ok, message, update) = Check();
-        var latest = update?.TargetFullRelease.Version.ToString() ?? "";
+        var latest = update?.TargetFullRelease.Version.ToString()
+                     ?? (ok ? AppInfo.Version : "");
         var info = new JsonObject
         {
             ["ok"] = ok,
