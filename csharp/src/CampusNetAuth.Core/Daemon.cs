@@ -188,6 +188,61 @@ public static class Daemon
         $"学号 {Utils.MaskUser(cfg.GetString("username"))} · " +
         $"运营商 {Utils.ServiceLabel(cfg.GetString("service"))}";
 
+    /// <summary>
+    /// 后台进程的简单版本检测：主界面没开时，发现新版本就在左下角提示 20s。
+    /// 主界面在跑时交给界面的更新弹窗，不重复打扰；同一版本 12h 内只提示一次。
+    /// </summary>
+    private static void CheckUpdateNoticeAsync()
+    {
+        if (UiRunning()) return;
+        Task.Run(() =>
+        {
+            try
+            {
+                if (UiRunning()) return;
+                var info = UpdateCheck.CheckLatest(force: false);
+                if (!info.GetBool("ok") || !info.GetBool("available")) return;
+                var latest = info.GetString("latest");
+                if (latest.Length == 0) return;
+                var st = State.Load();
+                if (st.GetString("update_notice_version") == latest &&
+                    Utils.Now() - st.GetInt64("update_notice_at") < 12 * 3600)
+                    return;
+                State.Update(new JsonObject
+                {
+                    ["update_notice_version"] = latest,
+                    ["update_notice_at"] = Utils.Now(),
+                });
+                Notify.Custom(new NotifyRequest
+                {
+                    Kind = NotifyKind.Success,
+                    Position = NotifyPosition.BottomLeft,
+                    Title = "发现新版本 v" + latest,
+                    Message = "打开主界面查看更新公告",
+                    AutoCloseSeconds = 20,
+                });
+            }
+            catch (Exception e)
+            {
+                Log.Debug("后台版本检查失败（忽略）: {0}", e.Message);
+            }
+        });
+    }
+
+    /// <summary>主界面是否在运行（UI 进程持有同名 Mutex）。</summary>
+    private static bool UiRunning()
+    {
+        try
+        {
+            using var mutex = Mutex.OpenExisting("CampusNetAuth.UI");
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>确认在线/登录成功后清掉历史失败标记与失败事件，避免界面一直挂着旧警告。</summary>
     public static void ClearAuthIssues()
     {
@@ -243,6 +298,7 @@ public static class Daemon
                 Log.Error("尚未配置账号密码，请先运行 setup");
                 return 1;
             }
+
 
             try { State.Update(new JsonObject { ["daemon_version"] = AppInfo.Version }); } catch { }
             var client = new PortalClient(cfg);
@@ -304,12 +360,20 @@ public static class Daemon
             var pauseLogged = 0L;
             var blockedReason = "";
             var authClean = false;
+            double? lastUpdateCheck = null;
 
             while (true)
             {
                 try
                 {
                     stats["loops"]++;
+
+                    var updateTick = Environment.TickCount64 / 1000.0;
+                    if (lastUpdateCheck == null || updateTick - lastUpdateCheck >= 6 * 3600)
+                    {
+                        lastUpdateCheck = updateTick;
+                        CheckUpdateNoticeAsync();
+                    }
 
                     if (!portalOk)
                     {

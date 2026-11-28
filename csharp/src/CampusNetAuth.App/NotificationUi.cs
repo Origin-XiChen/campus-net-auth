@@ -14,7 +14,7 @@ internal static class NotificationUi
 {
     private static readonly object Sync = new();
     private static Control? _dispatcher;
-    private static NotificationForm? _current;
+    private static readonly Dictionary<NotifyPosition, NotificationForm> Current = new();
 
     public static void Register() => Notify.CustomHandler = Show;
 
@@ -40,12 +40,18 @@ internal static class NotificationUi
     {
         try
         {
-            _current?.CloseImmediately();
+            if (Current.TryGetValue(request.Position, out var old))
+            {
+                old.CloseImmediately();
+                Current.Remove(request.Position);
+            }
             var form = new NotificationForm(request);
-            _current = form;
+            Current[request.Position] = form;
             form.FormClosed += (_, _) =>
             {
-                if (ReferenceEquals(_current, form)) _current = null;
+                if (Current.TryGetValue(request.Position, out var cur) &&
+                    ReferenceEquals(cur, form))
+                    Current.Remove(request.Position);
             };
             form.Show();
         }
@@ -293,8 +299,9 @@ internal sealed class NotificationForm : ShadowForm
     {
         UpdateRegion();
         var work = Screen.PrimaryScreen?.WorkingArea ?? Screen.GetWorkingArea(this);
-        _startX = work.Right + 12;
-        _targetX = work.Right - Width - 20;
+        var left = _request.Position == NotifyPosition.BottomLeft;
+        _startX = left ? work.Left - Width - 12 : work.Right + 12;
+        _targetX = left ? work.Left + 20 : work.Right - Width - 20;
         Top = work.Bottom - Height - 20;
         Left = _startX;
         _phase = 0;

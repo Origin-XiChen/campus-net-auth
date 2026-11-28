@@ -10,10 +10,17 @@ public enum NotifyKind
     Error,
 }
 
+public enum NotifyPosition
+{
+    BottomRight,
+    BottomLeft,
+}
+
 /// <summary>自定义右下角横幅/错误卡（由 App 层的 NotificationUi 绘制）。</summary>
 public sealed class NotifyRequest
 {
     public NotifyKind Kind { get; init; } = NotifyKind.Info;
+    public NotifyPosition Position { get; init; } = NotifyPosition.BottomRight;
     public string Title { get; init; } = "";
     public string Message { get; init; } = "";
     public string? Context { get; init; }
