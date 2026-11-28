@@ -32,10 +32,12 @@ python -m unittest discover -s tests   # 全量离线单测（当前 245 项，�
 > 根目录的 Python 0.6.4 代码为历史主线，保留参考/回退。C# 的构建、验收、迁移与
 > 发布说明见 `csharp/README.md`。
 
-- **交付形态**：单文件 `CampusNetAuth.exe`（PyInstaller `--onefile --windowed`），
-  绿色部署，配置/凭据/状态都在 exe 同目录。
-- **运行时零第三方依赖**（仅标准库）；`pywebview` 只用于构建 GUI 外壳。
-- **仅 Windows**（DPAPI、winreg、win32 API）。
+- **交付形态（V1.0.x）**：安装版为主（Velopack + 自绘安装引导器）；自 V1.0.3 起 Release
+  只发布安装版，绿色单文件仅保留开发/应急构建。安装版数据在 `%APPDATA%\CampusNetAuth`。
+- **历史形态（0.6.x）**：单文件 `CampusNetAuth.exe`（PyInstaller `--onefile --windowed`），
+  绿色部署，配置/凭据/状态都在 exe 同目录；运行时零第三方依赖（仅标准库），
+  `pywebview` 只用于构建 GUI 外壳。
+- **仅 Windows**（DPAPI、winreg、win32 API / WinForms + WebView2）。
 
 ## 2. 架构与边界
 
@@ -146,21 +148,38 @@ git grep -nE "\b[0-9]{10}\b" -- .      # 人工确认全是占位值/时间戳/�
 
 ## 6. 发布 Release 流程
 
-1. 改 `campusnet.py` 的 `APP_VERSION`（含上方的版本说明注释，简述本版内容）。
-2. 重建：Windows 下双击 `build_exe.bat`（本机可用 `_build_local.bat` 指定 Python）；
-   产物 `dist\CampusNetAuth.exe`（fresh build），同时复制到仓库根作为开发副本。
-3. 校验：PE 版本资源与 `--version` 都应为新版本；跑 §5 的全套验收。
-4. 提交（中文 Conventional Commits：`feat:` / `fix:` / `refactor:` / `test:` / `docs:`，
-   标题带版本号，正文写清"为什么 + 做了什么 + 怎么验证"）→ `git push origin main`。
+> **分发策略**：自 V1.0.3 起 Release **只发布安装版**；`CampusNetAuth.exe` 绿色单文件仅保留
+> 开发/应急构建，不再上传。绿色/便携用户检查更新时只提示前往发布页改用安装包；
+> V1.0.2 是最后一个附带绿色包的版本。
+
+1. 改版本唯一来源：`csharp/src/CampusNetAuth.App/CampusNetAuth.App.csproj` 与
+   `csharp/src/CampusNetAuth.Setup/CampusNetAuth.Setup.csproj` 的 `<Version>`（两处保持一致）。
+2. 构建安装版：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1 -Version <版本>
+   ```
+   产物在 `csharp/dist/releases/`：`CampusNetAuth-Installer.exe`（自绘引导器）、
+   `CampusNetAuth-win-Setup.exe`、`CampusNetAuth-<版本>-full.nupkg`、`releases.win.json`、
+   `assets.win.json`、`RELEASES`。**不要**把绿色 exe / Portable zip 放进 Release。
+3. 校验：PE 版本与 `--version` 为新版本；C# 自检、Python 单测、UI 静态校验通过；
+   核对 `releases.win.json` 与 nupkg 的 size/SHA1/SHA256；用已安装旧版执行一次
+   「检查更新」确认能看到新版本（不替用户点安装）。
+4. 提交（中文 Conventional Commits，标题带版本号，正文写清"为什么 + 做了什么 + 怎么验证"）
+   → `git push origin main`。
 5. 打标签：`git tag -a V<版本> -m "..."` → `git push origin V<版本>`。
-6. 发布：
+6. 发布（草稿 → 上传 → 发布，避免大资产中断留下半成品）：
    ```bash
    gh release create V<版本> --repo Origin-XiChen/campus-net-auth \
-     --title "CampusNetAuth V<版本>" --notes-file <说明.md> dist/CampusNetAuth.exe
+     --title "CampusNetAuth V<版本>" --notes-file <说明.md> --draft --verify-tag
+   gh release upload V<版本> --repo Origin-XiChen/campus-net-auth \
+     CampusNetAuth-Installer.exe CampusNetAuth-win-Setup.exe \
+     CampusNetAuth-<版本>-full.nupkg releases.win.json assets.win.json RELEASES
+   gh release edit V<版本> --repo Origin-XiChen/campus-net-auth --draft=false
    ```
-   说明文档写：背景 / 修复或新增（表格）/ 行为变化与风险 / 验证 / 升级方式 / 变更对比链接。
-7. 发布后：更新 §9 版本进度表；把 Release 链接补到相关 PR / issue 评论（见 §7）。
-8. tag 命名沿用 `V0.6.1`（大写 V，三段版本号）；Release 标题 `CampusNetAuth V0.6.1`。
+   说明文档写：背景 / 修复或新增 / 分发与升级方式 / 验证 / 变更对比链接。
+7. 发布后：更新 §9 版本进度表；绿色/旧版用户只提示使用安装包；把 Release 链接补到
+   相关 PR / issue 评论（见 §7），不要跨 issue 刷屏。
+8. tag 命名沿用 `V1.0.2`（大写 V，三段版本号）；Release 标题 `CampusNetAuth V1.0.2`。
 
 ## 7. 对外沟通规范（GitHub）
 
@@ -202,6 +221,7 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 
 **当前开发线**：`main`（C# 主线），`AppInfo.Version = 1.0.2`；
 已发布 **V1.0.2 界面版**（分区重排 + 1.0.1 资产修订汇总），历史版本 V0.6.x（Python）、V0.7.0 绿色过渡版、V1.0.0 正式版、V1.0.1 补丁版。
+**后续 Release 只发布安装版**（绿色包自 V1.0.3 起不再上传）。
 具体提交以 `git log` / `git status -sb` 为准——本节不钉死提交号，避免文档一提交就过期。
 
 | 版本 | 日期 | 状态 | 要点 |
@@ -226,7 +246,7 @@ CampusNetAuth.exe test                # 自检（离线协议自测）
 | V1.0.0-preview.3 | 2026-11-27 | 预发布 | 首个自绘安装引导器（安装位置/选项/内嵌安装器）+ 守护自愈、cred.bin 兼容 0.6.4、更新卡片缓存、卸载自启归属 |
 | V1.0.0 | 2026-11-27 | 已发布 | C# 正式版：自绘安装引导器 + 安装器（Velopack）/绿色单文件双形态；自动迁移旧数据并清理旧目录；守护自愈、通知、原生窗口；CI 增加 C# 构建与自检 |
 | V1.0.1 | 2026-11-28 | 已发布 | 1.0.0 补丁：安装器 UI/提示窗修复、门户地址 host:port、自绘右下角横幅/错误卡、通知统一；验证应用内更新 |
-| V1.0.2 | 2026-11-28 | 已发布 | 界面分区重排：连接与账号两栏（账号 / 网络与运营商）、自动化与维护网格化（守护与自启通栏、更新通栏、代理/工具箱并排、卸载通栏、检测参数折叠）；并入 1.0.1 资产后续修订（更新缓存/进度、错误清理、更新公告弹窗、在线后版本检测） |
+| V1.0.2 | 2026-11-28 | 已发布 | 界面分区重排：连接与账号两栏（账号 / 网络与运营商）、自动化与维护网格化（守护与自启通栏、更新通栏、代理/工具箱并排、卸载通栏、检测参数折叠）；并入 1.0.1 资产后续修订（更新缓存/进度、错误清理、更新公告弹窗、在线后版本检测）；**最后一个附带绿色包的版本** |
 
 ## 10. 已知残留与下一版候选
 

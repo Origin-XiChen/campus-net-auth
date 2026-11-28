@@ -6,6 +6,7 @@
 **0.7.0 绿色过渡版已于 2026-11-27 发布**（单文件自包含，0.6.4 可一键升级）；
 **V1.0.0 正式版、V1.0.1 补丁版已发布；V1.0.2** 重排「连接与账号」「自动化与维护」分区，
 并汇总 1.0.1 资产后续修订（更新缓存/进度、错误清理、更新公告弹窗、在线后版本检测）。
+**自 V1.0.3 起 Release 只发布安装版**，绿色包仅保留开发/应急构建。
 
 ## 工具链
 
@@ -91,12 +92,16 @@ powershell -ExecutionPolicy Bypass -File csharp/build_icon.ps1
   同目录的旧数据**复制**过去（不覆盖已有文件）；
 - 可用 `CNA_DATA_DIR` 环境变量覆盖（测试/便携场景）。
 
-## 绿色单文件构建（0.6.x 的兼容升级件）
+## 绿色单文件构建（开发/应急，不再作为 Release 资产）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File csharp/build_green.ps1 [-Version 0.7.0]
 # 产物：csharp/dist/green/CampusNetAuth.exe（约 50 MB，自包含单文件）
 ```
+
+> V1.0.2 是最后一个附带绿色包的 Release。自 V1.0.3 起 Release 只发布安装版；
+> 绿色单文件仅保留开发/应急构建，不再上传。旧绿色用户请运行 Installer，
+> 安装时自动导入配置、凭据与开机自启，并把旧目录移入回收站。
 
 - 自包含 win-x64 + 压缩单文件；首次运行把原生库解包到 `%TEMP%\.net\...`，之后启动很快
   （实测 `--version` 约 0.3 秒）；
@@ -116,7 +121,11 @@ powershell -ExecutionPolicy Bypass -File csharp/build_installer.ps1 [-Version 1.
 #   CampusNetAuth-Installer.exe   自绘安装引导器（内嵌 Setup，推荐给用户）
 #   CampusNetAuth-win-Setup.exe   Velopack 一键安装（IT/命令行）
 #   *.nupkg / releases.win.json   应用内更新资产
+#   assets.win.json / RELEASES    Velopack 清单
 ```
+
+- **Release 只上传以上安装版资产**（含 nupkg 与更新清单），不上传绿色 exe / Portable zip；
+  绿色/便携用户检查更新时只提示改用安装包。
 
 - 引导器是独立的 WinForms 自绘窗口（不依赖 WebView2，安装前也能运行）：安装位置可改、
   右侧「选项」（安装后启动）、安装中禁止关闭；安装完成后的首次启动会自动迁移旧版配置、
