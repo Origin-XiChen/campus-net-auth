@@ -200,6 +200,14 @@ input{font-family:inherit;font-size:inherit}
   color:#7a4d0b;border-radius:var(--radius-md);padding:10px 14px;
   font-size:12px;line-height:1.65;margin-bottom:16px;
 }
+/* 更新下载进度：细进度条 + 百分比/速度/已下载 */
+.update-progress{margin:2px 0 14px;padding:10px 12px;background:var(--primary-50);
+  border:1px solid rgba(0,122,255,.18);border-radius:var(--radius-md)}
+.update-bar{height:6px;background:rgba(0,122,255,.15);border-radius:3px;overflow:hidden}
+.update-bar i{display:block;height:100%;width:0;background:var(--primary);
+  border-radius:3px;transition:width .35s ease}
+.update-meta{display:flex;justify-content:space-between;gap:10px;margin-top:6px;
+  font-size:11px;color:var(--muted)}
 /* 状态警示条：守护异常 / 登录失败提示（复用部署横幅视觉） */
 .warn-bar{
   display:flex;align-items:center;gap:12px;
@@ -522,6 +530,14 @@ input{font-family:inherit;font-size:inherit}
             <button class="btn btn-ghost" id="btnUpdateCheck" style="flex-shrink:0">检查更新</button>
             <button class="btn btn-primary" id="btnUpdateInstall" style="flex-shrink:0;display:none">下载并升级</button>
             <button class="btn btn-ghost" id="btnOpenRelease" style="flex-shrink:0;display:none">打开发布页</button>
+          </div>
+          <div class="update-progress" id="updateProgress" style="display:none">
+            <div class="update-bar"><i id="updateBar"></i></div>
+            <div class="update-meta">
+              <span id="updatePct">0%</span>
+              <span id="updateSpeed"></span>
+              <span id="updateBytes"></span>
+            </div>
           </div>
           <div class="comp-row">
             <div class="comp-info">
@@ -1037,6 +1053,66 @@ function busy(on, btn, text){
   else { btn.innerHTML = btn.dataset._t || btn.innerHTML; btn.disabled = false; }
 }
 
+/* ---------- 更新下载进度 ---------- */
+function fmtBytes(n){
+  n = Number(n) || 0;
+  if (n <= 0) return '—';
+  const u = ['B','KB','MB','GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1){ n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+}
+function showUpdateProgress(on){
+  const el = $('#updateProgress');
+  if (el) el.style.display = on ? 'block' : 'none';
+}
+function setUpdateProgress(p){
+  const pct = Math.max(0, Math.min(100, Number(p && p.percent) || 0));
+  $('#updateBar').style.width = pct + '%';
+  $('#updatePct').textContent = Math.round(pct) + '%'
+    + (p && p.phase ? ' · ' + p.phase : '');
+  $('#updateSpeed').textContent = (p && p.speed > 0) ? (fmtBytes(p.speed) + '/s') : '';
+  $('#updateBytes').textContent = (p && p.total > 0)
+    ? (fmtBytes(p.downloaded) + ' / ' + fmtBytes(p.total)) : '';
+}
+async function runUpdateInstall(btn){
+  busy(true, btn, '准备下载…');
+  showUpdateProgress(true);
+  setUpdateProgress({percent:0, phase:'准备下载'});
+  try{
+    const r = await post('/api/update/install');
+    if (!r.id){ toast('启动失败'); busy(false, btn); showUpdateProgress(false); return; }
+    const id = r.id;
+    for (let i = 0; i < 1800; i++){
+      await new Promise(res => setTimeout(res, 1000));
+      let t;
+      try { t = await api('/api/task?id=' + id); }
+      catch(e){
+        showUpdateProgress(false);
+        toast('更新已下载，正在重启应用…', 6000);
+        return;
+      }
+      if (t.progress){
+        setUpdateProgress(t.progress);
+        btn.innerHTML = '<span class="spin"></span>' + Math.round(Number(t.progress.percent) || 0) + '%';
+      }
+      if (t.status !== 'running'){
+        showUpdateProgress(false);
+        busy(false, btn);
+        if (t.status === 'done'){
+          outputDialog('下载并升级 · 完成',
+            (t.output && String(t.output).trim()) || '更新已下载，应用即将重启');
+        } else {
+          toast('更新失败：' + ((t.output && String(t.output).trim()) || '未知错误'), 6000);
+        }
+        load();
+        return;
+      }
+    }
+    busy(false, btn); showUpdateProgress(false); toast('任务超时');
+  }catch(e){ busy(false, btn); showUpdateProgress(false); toast('出错：' + e, 5000); }
+}
+
 async function withTask(url, btn, busyText, doneTitle){
   busy(true, btn, busyText);
   try{
@@ -1184,10 +1260,10 @@ $('#btnUpdateInstall').onclick = () => {
   confirmDialog({
     title: '下载并升级到 v' + (u.latest || ''),
     html: '将下载 <b>v' + esc(u.latest || '') + '</b>（' + size + '）并<b>就地升级</b>：'
-        + '停止守护 → 替换程序文件 → 用新版本重启守护。<br><br>'
-        + '下载后会校验 <b>SHA256 + 文件版本</b>；升级完成后需要<b>关闭并重新打开本界面</b>。确定继续？',
+        + '停止守护 → 替换程序文件 → 用新版本重启。<br><br>'
+        + '下载后会校验 <b>SHA256 + 文件版本</b>；升级完成后应用会自动重启（守护会自动拉起）。确定继续？',
     okText: '下载并升级',
-    onOk: () => withTask('/api/update/install', $('#btnUpdateInstall'), '下载中…', '下载并升级')
+    onOk: () => runUpdateInstall($('#btnUpdateInstall'))
   });
 };
 $('#btnOpenRelease2').onclick = () => openRelease();

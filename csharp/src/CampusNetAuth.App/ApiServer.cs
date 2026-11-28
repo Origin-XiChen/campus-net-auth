@@ -29,6 +29,7 @@ public sealed class ApiServer : IDisposable
     {
         public string Status = "running";
         public string Output = "";
+        public string Kind = "";
     }
 
     public ApiServer(bool firstDeploy, List<string> foreignFiles)
@@ -481,7 +482,7 @@ public sealed class ApiServer : IDisposable
     private string StartTask(Func<string> work, string name)
     {
         var id = Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant();
-        var entry = new TaskEntry();
+        var entry = new TaskEntry { Kind = name };
         lock (_lock) _tasks[id] = entry;
         Task.Run(() =>
         {
@@ -515,7 +516,16 @@ public sealed class ApiServer : IDisposable
             if (!_tasks.TryGetValue(id, out var entry))
                 return new JsonObject { ["status"] = "error", ["output"] = "任务不存在" };
             if (entry.Status == "running")
-                return new JsonObject { ["status"] = "running", ["output"] = "" };
+            {
+                var running = new JsonObject { ["status"] = "running", ["output"] = "" };
+                if (entry.Kind == "update_install")
+                {
+                    running["progress"] = AppInfo.IsInstalled
+                        ? VelopackUpdater.ProgressJson()
+                        : new JsonObject { ["percent"] = 0, ["phase"] = "下载中" };
+                }
+                return running;
+            }
             _tasks.Remove(id);
             return new JsonObject { ["status"] = entry.Status, ["output"] = entry.Output };
         }

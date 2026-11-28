@@ -57,7 +57,10 @@ public static class UpdateCheck
         {
             if (_cache == null) SeedFromState();
             _cache ??= Default();
-            return Clone(_cache);
+            var result = Clone(_cache);
+            var latest = result.GetString("latest");
+            result["available"] = latest.Length > 0 && AppInfo.IsNewer(latest, AppInfo.Version);
+            return result;
         }
     }
 

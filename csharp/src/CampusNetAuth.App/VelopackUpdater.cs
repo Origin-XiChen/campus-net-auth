@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Velopack;
 using Velopack.Sources;
@@ -14,6 +15,70 @@ internal static class VelopackUpdater
     private const long SuccessTtl = 6 * 3600;
     private const long FailTtl = 300;
     private static int _checking;
+
+    private sealed class ProgressState
+    {
+        public int Percent;
+        public long Total;
+        public long Downloaded;
+        public double Speed;
+        public string Phase = "";
+    }
+
+    private static readonly object ProgressLock = new();
+    private static readonly ProgressState Current = new();
+
+    public static JsonObject ProgressJson()
+    {
+        lock (ProgressLock)
+        {
+            return new JsonObject
+            {
+                ["percent"] = Current.Percent,
+                ["total"] = Current.Total,
+                ["downloaded"] = Current.Downloaded,
+                ["speed"] = Current.Speed,
+                ["phase"] = Current.Phase,
+            };
+        }
+    }
+
+    private static void SetProgress(int percent, long total, long downloaded, double speed, string phase)
+    {
+        lock (ProgressLock)
+        {
+            Current.Percent = percent;
+            Current.Total = total;
+            Current.Downloaded = downloaded;
+            Current.Speed = speed;
+            Current.Phase = phase;
+        }
+    }
+
+    /// <summary>升级后缓存里的 available 是按旧版本算的：按当前程序集版本重算。</summary>
+    private static JsonObject Normalize(JsonObject info)
+    {
+        var result = (JsonObject)info.DeepClone();
+        var latest = result.GetString("latest");
+        var changed = !string.Equals(result.GetString("current"), AppInfo.Version,
+            StringComparison.OrdinalIgnoreCase);
+        result["current"] = AppInfo.Version;
+        if (changed)
+            result["available"] = latest.Length > 0 && VersionNewer(latest, AppInfo.Version);
+        return result;
+    }
+
+    private static bool VersionNewer(string latest, string current)
+    {
+        try
+        {
+            return SemanticVersion.Parse(latest).CompareTo(SemanticVersion.Parse(current)) > 0;
+        }
+        catch
+        {
+            return AppInfo.IsNewer(latest, current);
+        }
+    }
 
     private static UpdateManager Manager() =>
         new(new GithubSource($"https://github.com/{AppInfo.GitHubRepo}", null,
@@ -43,7 +108,7 @@ internal static class VelopackUpdater
     public static JsonObject CheckInfo(bool force=false)
     {
         var cached = LoadCached();
-        if (!force && cached != null && Fresh(cached)) return (JsonObject)cached.DeepClone();
+        if (!force && cached != null && Fresh(cached)) return Normalize(cached);
 
         var (ok, message, update) = Check();
         var latest = update?.TargetFullRelease.Version.ToString() ?? "";
@@ -59,18 +124,18 @@ internal static class VelopackUpdater
             ["checked_at"] = Utils.Now(),
             ["error"] = ok ? "" : message,
             ["asset_url"] = "",
-            ["asset_size"] = 0,
+            ["asset_size"] = update?.TargetFullRelease.Size ?? 0,
             ["asset_sha256"] = "",
         };
         SaveCached(info);
-        return (JsonObject)info.DeepClone();
+        return Normalize(info);
     }
 
     /// <summary>状态轮询用：返回缓存；缓存过期时在后台补查一次，绝不阻塞接口。</summary>
     public static JsonObject GetInfoOrStartCheck()
     {
         var cached = LoadCached();
-        if (cached != null && Fresh(cached)) return (JsonObject)cached.DeepClone();
+        if (cached != null && Fresh(cached)) return Normalize(cached);
         if (Interlocked.CompareExchange(ref _checking, 1, 0) == 0)
         {
             Task.Run(() =>
@@ -80,7 +145,7 @@ internal static class VelopackUpdater
             });
         }
         return cached != null
-            ? (JsonObject)cached.DeepClone()
+            ? Normalize(cached)
             : new JsonObject
             {
                 ["ok"] = false,
@@ -139,14 +204,35 @@ internal static class VelopackUpdater
             var mgr = Manager();
             var update = mgr.CheckForUpdatesAsync().GetAwaiter().GetResult();
             if (update == null) return "已是最新版本";
-            mgr.DownloadUpdates(update);
+            var total = update.TargetFullRelease.Size;
+            var clock = Stopwatch.StartNew();
+            long lastBytes = 0;
+            var lastMs = 0.0;
+            var speed = 0.0;
+            SetProgress(0, total, 0, 0, "下载中");
+            mgr.DownloadUpdates(update, pct =>
+            {
+                var ms = clock.Elapsed.TotalMilliseconds;
+                var bytes = total > 0 ? total * Math.Clamp(pct, 0, 100) / 100 : 0;
+                if (ms - lastMs >= 250)
+                {
+                    var inst = (bytes - lastBytes) * 1000.0 / Math.Max(1, ms - lastMs);
+                    speed = speed <= 0 ? inst : speed * 0.7 + inst * 0.3;
+                    lastBytes = bytes;
+                    lastMs = ms;
+                    SetProgress(pct, total, bytes, speed, "下载中");
+                }
+            });
+            SetProgress(100, total, total, speed, "校验安装");
             Log.Info("更新包已下载，准备重启应用：v{0}", update.TargetFullRelease.Version);
+            SetProgress(100, total, total, speed, "正在重启");
             mgr.ApplyUpdatesAndRestart(update.TargetFullRelease);
             return "更新已下载，正在重启应用";
         }
         catch (Exception e)
         {
             Log.Error("Velopack 更新失败: {0}", e.Message);
+            SetProgress(0, 0, 0, 0, "失败");
             return "更新失败：" + e.Message;
         }
     }
