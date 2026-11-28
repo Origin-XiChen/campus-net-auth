@@ -223,10 +223,15 @@ input{font-family:inherit;font-size:inherit}
   content:"";position:absolute;top:2px;left:2px;width:24px;height:24px;
   border-radius:50%;background:#fff;
   box-shadow:0 2px 5px rgba(0,0,0,.18),0 1px 2px rgba(0,0,0,.1);
-  transition:transform .26s cubic-bezier(.22,1,.36,1);
+  transition:left .26s cubic-bezier(.22,1,.36,1),
+    transform .26s cubic-bezier(.22,1,.36,1);
 }
 .switch.on{background:var(--success)}
 .switch.on::after{transform:translateX(19px)}
+/* 等待后台结果：轨道转黄，滑块停在中间，完成后再落到目标侧 */
+.switch.pending{background:#f0a020;pointer-events:none;
+  box-shadow:0 0 0 3px rgba(240,160,32,.16)}
+.switch.pending::after{left:calc(50% - 12px);transform:none}
 
 /* ---------- 状态项 ---------- */
 .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px 22px}
@@ -344,10 +349,36 @@ input{font-family:inherit;font-size:inherit}
 .update-modal{width:600px;max-width:calc(100vw - 48px)}
 .update-vers{display:flex;justify-content:space-between;gap:10px;margin-top:8px;
   font-size:12px;color:var(--muted)}
-.update-notes{margin-top:12px;max-height:280px;overflow:auto;white-space:pre-wrap;
+.update-notes{margin-top:12px;max-height:300px;overflow:auto;white-space:normal;
   font-size:12.5px;line-height:1.7;color:#333;background:#f7f7f9;
   border:1px solid var(--border);border-radius:12px;padding:12px 14px}
 .update-notes.loading{color:var(--muted)}
+.update-notes > :first-child{margin-top:0}
+.update-notes > :last-child{margin-bottom:0}
+.update-notes p{margin:0 0 8px}
+.update-notes h1,.update-notes h2,.update-notes h3,.update-notes h4{
+  margin:0 0 6px;line-height:1.45;font-weight:700;color:var(--text)}
+.update-notes h1{font-size:16px}
+.update-notes h2{font-size:15px;margin-top:12px}
+.update-notes h3{font-size:14px;margin-top:10px}
+.update-notes h4{font-size:13px;margin-top:8px}
+.update-notes ul,.update-notes ol{margin:2px 0 8px;padding-left:20px}
+.update-notes li{margin:2px 0}
+.update-notes li::marker{color:var(--muted)}
+.update-notes strong{font-weight:700;color:var(--text)}
+.update-notes code{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;
+  background:#e8e8ef;border-radius:4px;padding:1px 4px}
+.update-notes pre{margin:6px 0 8px;padding:10px 12px;background:#1c1c1e;
+  color:#e8e8ed;border-radius:8px;overflow:auto}
+.update-notes pre code{background:none;color:inherit;padding:0;font-size:11px}
+.update-notes blockquote{margin:6px 0;padding-left:10px;
+  border-left:3px solid var(--border);color:var(--muted)}
+.update-notes hr{border:0;border-top:1px solid var(--border);margin:10px 0}
+.update-status{margin-top:10px;padding:8px 12px;border-radius:8px;font-size:12px;
+  line-height:1.6;display:none}
+.update-status.show{display:block}
+.update-status.err{background:var(--danger-50);color:var(--danger)}
+.update-status.ok{background:var(--success-50);color:var(--success)}
 
 /* ---------- 气泡通知 ---------- */
 .toast{
@@ -367,6 +398,7 @@ input{font-family:inherit;font-size:inherit}
   border-top-color:#fff;border-radius:50%;display:inline-block;
   animation:spin .7s linear infinite;vertical-align:-2px;margin-right:6px;
 }
+.spin.dark{border-color:rgba(0,0,0,.18);border-top-color:currentColor}
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
@@ -719,6 +751,7 @@ input{font-family:inherit;font-size:inherit}
         <span id="updMBytes"></span>
       </div>
     </div>
+    <div class="update-status" id="updateModalStatus"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="updateLater">稍后</button>
       <button class="btn btn-primary" id="updateNow">立即更新</button>
@@ -758,6 +791,8 @@ let toastTimer = null;
 // 最近一次 /api/status 的原始结果：按钮回调（如升级确认框）要用到其中的
 // 候选版本信息，而 load() 里是局部变量，故额外存一份。
 let lastSt = {};
+// 守护操作进行中：轮询刷新不要覆盖按钮的禁用/转圈状态
+let daemonBusy = false;
 // HTML 转义（事件/路径等外部文本进 innerHTML 前一律过一道）
 const esc = (s) => String(s == null ? '' : s).replace(/[<>&"']/g,
   c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
@@ -799,6 +834,84 @@ function outputDialog(title, text){
 }
 
 
+/* ---------- 更新公告 Markdown（安全子集：先转义 HTML，再生成标签） ---------- */
+function mdInline(s){
+  const codes = [];
+  let t = esc(s);
+  // 行内代码先占位，避免里面的星号/链接被二次处理
+  t = t.replace(/`([^`]+)`/g, (_, code) => {
+    codes.push('<code>' + code + '</code>');
+    return '\u0000' + (codes.length - 1) + '\u0000';
+  });
+  // 不在内嵌 WebView 里跳转外链（否则会把本地界面带走），只保留链接文字
+  t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+  t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[Number(i)] || '');
+  return t;
+}
+function renderMarkdown(md){
+  const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
+  let html = '';
+  let para = [];
+  let list = '';
+  let code = null;
+  const flushPara = () => {
+    if (!para.length) return;
+    html += '<p>' + para.map(mdInline).join('<br>') + '</p>';
+    para = [];
+  };
+  const closeList = () => {
+    if (!list) return;
+    html += '</' + list + '>';
+    list = '';
+  };
+  const blocks = () => { flushPara(); closeList(); };
+  for (const raw of lines){
+    const line = raw.replace(/[ \t]+$/, '');
+    if (code){
+      if (/^\s*```/.test(line)){
+        html += '<pre><code>' + esc(code.join('\n')) + '</code></pre>';
+        code = null;
+      } else code.push(raw);
+      continue;
+    }
+    if (/^\s*```/.test(line)){ blocks(); code = []; continue; }
+    if (!line.trim()){ blocks(); continue; }
+    let m;
+    if ((m = line.match(/^(#{1,4})\s+(.*)$/))){
+      blocks();
+      const n = m[1].length;
+      html += '<h' + n + '>' + mdInline(m[2]) + '</h' + n + '>';
+      continue;
+    }
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)){
+      blocks(); html += '<hr>'; continue;
+    }
+    if ((m = line.match(/^\s*>\s?(.*)$/))){
+      blocks(); html += '<blockquote>' + mdInline(m[1]) + '</blockquote>'; continue;
+    }
+    if ((m = line.match(/^\s*[-*+]\s+(.*)$/))){
+      flushPara();
+      if (list !== 'ul'){ closeList(); html += '<ul>'; list = 'ul'; }
+      html += '<li>' + mdInline(m[1]) + '</li>';
+      continue;
+    }
+    if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))){
+      flushPara();
+      if (list !== 'ol'){ closeList(); html += '<ol>'; list = 'ol'; }
+      html += '<li>' + mdInline(m[1]) + '</li>';
+      continue;
+    }
+    closeList();
+    para.push(line);
+  }
+  if (code) html += '<pre><code>' + esc(code.join('\n')) + '</code></pre>';
+  blocks();
+  return html || '<p>（没有公告内容）</p>';
+}
+
+
 /* ---------- 新版本公告弹窗（自动检测 + 公告 + 下载进度） ---------- */
 function setModalProgress(p){
   const pct = Math.max(0, Math.min(100, Number(p && p.percent) || 0));
@@ -817,7 +930,10 @@ async function openUpdateDialog(upd){
     + '</b>　→　最新 <b>v' + esc(upd.latest) + '</b>';
   const notes = $('#updateModalNotes');
   notes.className = 'update-notes loading';
-  notes.textContent = '正在加载更新公告…';
+  notes.innerHTML = '<span class="spin dark"></span>正在加载更新公告…';
+  const status = $('#updateModalStatus');
+  status.className = 'update-status';
+  status.textContent = '';
   $('#updMProgress').style.display = 'none';
   setModalProgress({percent:0, phase:''});
   $('#updateNow').disabled = false;
@@ -834,14 +950,16 @@ async function openUpdateDialog(upd){
     const r = await api('/api/update/notes?version=' + encodeURIComponent(upd.latest));
     notes.className = 'update-notes';
     if (r && r.ok && String(r.notes || '').trim()){
-      notes.textContent = r.notes;
+      notes.innerHTML = renderMarkdown(r.notes);
     } else {
-      notes.textContent = '（未能获取更新公告'
-        + (r && r.error ? '：' + r.error : '') + '）\n可直接点击「立即更新」。';
+      notes.innerHTML = '<p>（未能获取更新公告'
+        + (r && r.error ? '：' + esc(r.error) : '') + '）</p>'
+        + '<p>可直接点击「立即更新」。</p>';
     }
   }catch(e){
     notes.className = 'update-notes';
-    notes.textContent = '（获取更新公告失败：' + e + '）\n可直接点击「立即更新」。';
+    notes.innerHTML = '<p>（获取更新公告失败：' + esc(String(e)) + '）</p>'
+      + '<p>可直接点击「立即更新」。</p>';
   }
 }
 function maybePromptUpdate(st){
@@ -860,8 +978,15 @@ async function startModalUpdate(upd){
   $('#updateNow').innerHTML = '<span class="spin"></span>下载中…';
   $('#updMProgress').style.display = 'block';
   setModalProgress({percent:0, phase:'准备下载'});
+  const status = $('#updateModalStatus');
+  status.className = 'update-status';
+  status.textContent = '';
+  const setStatus = (text, ok) => {
+    status.textContent = text;
+    status.className = 'update-status show ' + (ok ? 'ok' : 'err');
+  };
   const fail = (text) => {
-    $('#updateModalNotes').textContent = text;
+    setStatus(text, false);
     $('#updateNow').disabled = false;
     $('#updateLater').disabled = false;
     $('#updateNow').textContent = '重试';
@@ -876,14 +1001,14 @@ async function startModalUpdate(upd){
       let t;
       try { t = await api('/api/task?id=' + id); }
       catch(e){
-        $('#updateModalNotes').textContent = '更新已下载，正在重启应用…';
+        setStatus('更新已下载，正在重启应用…', true);
         return;
       }
       if (t.progress) setModalProgress(t.progress);
       if (t.status !== 'running'){
         if (t.status === 'done'){
-          $('#updateModalNotes').textContent = (t.output && String(t.output).trim())
-            || '更新已下载，应用即将重启…';
+          setStatus((t.output && String(t.output).trim())
+            || '更新已下载，应用即将重启…', true);
         } else {
           fail('更新失败：' + ((t.output && String(t.output).trim()) || '未知错误'));
         }
@@ -969,38 +1094,91 @@ function setService(v){
 let swAutoVal = false;
 let swProxyGuardVal = true;   // true = proxy_guard 为 auto
 let deployBannerDone = false;
+// 需要等后台结果的开关：先把滑块挪到中间、轨道转黄，结果回来后再落到目标侧；
+// 失败则回到原位，避免"点了没反应，过一会自己跳过去"。
+function beginSwitch(el){
+  if (!el || el.classList.contains('pending')) return false;
+  el.classList.remove('on');
+  el.classList.add('pending');
+  return true;
+}
+function endSwitch(el, on){
+  el.classList.remove('pending');
+  el.classList.toggle('on', !!on);
+}
+
 $('#swAuto').onclick = async () => {
+  const el = $('#swAuto');
+  if (!beginSwitch(el)) return;
   const want = !swAutoVal;
-  const r = want ? await post('/api/autostart/install')
-                 : await post('/api/autostart/uninstall');
-  if (r && r.ok){
-    toast(r.message || (want ? '已开启开机自启' : '已关闭开机自启'), 3600);
+  const prev = swAutoVal;
+  try {
+    const r = want ? await post('/api/autostart/install')
+                   : await post('/api/autostart/uninstall');
+    if (r && r.ok){
+      swAutoVal = want;
+      endSwitch(el, want);
+      toast(r.message || (want ? '已开启开机自启' : '已关闭开机自启'), 3600);
+      load();
+    } else {
+      endSwitch(el, prev);
+      toast((r && r.message) || '操作失败', 3200);
+      load();
+    }
+  } catch(e){
+    endSwitch(el, prev);
+    toast('操作失败：' + e, 3200);
     load();
-  } else toast((r && r.message) || '操作失败', 3200);
+  }
 };
 
 /* 系统代理守卫开关：只是改 config.json 的 proxy_guard，不动注册表 */
 $('#swProxyGuard').onclick = async () => {
+  const el = $('#swProxyGuard');
+  if (!beginSwitch(el)) return;
   const want = !swProxyGuardVal;
-  const r = await post('/api/config', {proxy_guard: want ? 'auto' : 'off'});
-  if (r && r.ok){
-    toast(want ? '已开启代理守卫：认证前会自动关闭系统代理'
-               : '已关闭代理守卫：程序不再碰你的代理设置');
+  const prev = swProxyGuardVal;
+  try {
+    const r = await post('/api/config', {proxy_guard: want ? 'auto' : 'off'});
+    if (r && r.ok){
+      swProxyGuardVal = want;
+      endSwitch(el, want);
+      toast(want ? '已开启代理守卫：认证前会自动关闭系统代理'
+                 : '已关闭代理守卫：程序不再碰你的代理设置');
+      load();
+    } else {
+      endSwitch(el, prev);
+      toast('保存失败', 3200);
+      load();
+    }
+  } catch(e){
+    endSwitch(el, prev);
+    toast('保存失败：' + e, 3200);
     load();
-  } else toast('保存失败', 3200);
+  }
 };
 $('#btnProxyOff').onclick = async () => {
-  const r = await post('/api/proxy/off', {});
-  if (r && r.ok){
-    toast(r.changed ? '系统代理已关闭' : '当前没有开启的系统代理，无需处理');
-    load();
-  } else toast('关闭失败，详见日志', 3600);
+  const btn = $('#btnProxyOff');
+  if (btn.disabled) return;
+  busy(true, btn, '处理中…');
+  try {
+    const r = await post('/api/proxy/off', {});
+    if (r && r.ok){
+      toast(r.changed ? '系统代理已关闭' : '当前没有开启的系统代理，无需处理');
+    } else toast('关闭失败，详见日志', 3600);
+  } catch(e){ toast('关闭失败：' + e, 3600); }
+  finally { busy(false, btn); await load(); }
 };
 $('#btnProxyRestore').onclick = async () => {
-  const r = await post('/api/proxy/restore', {});
-  toast(r && r.ok ? '已恢复关闭前的代理设置'
-                  : (r && r.message) || '没有可恢复的代理设置', 3600);
-  load();
+  const btn = $('#btnProxyRestore');
+  if (btn.disabled) return;
+  busy(true, btn, '恢复中…');
+  try {
+    const r = await post('/api/proxy/restore', {});
+    toast(r && r.ok ? '已恢复关闭前的代理设置'
+                    : (r && r.message) || '没有可恢复的代理设置', 3600);
+  } catch(e){ toast('恢复失败：' + e, 3600); }
+  finally { busy(false, btn); await load(); }
 };
 
 /* ---------- 状态刷新 ---------- */
@@ -1035,8 +1213,12 @@ async function load(){
   $('#stAuto').textContent = st.autostart ? '已启用' : '未启用';
 
   /* ---- 系统代理守卫 ---- */
-  swProxyGuardVal = (st.proxy_guard !== 'off');
-  $('#swProxyGuard').classList.toggle('on', swProxyGuardVal);
+  // 开关正在等后台结果时不要用轮询状态覆盖中间态
+  const swPxEl = $('#swProxyGuard');
+  if (!swPxEl.classList.contains('pending')){
+    swProxyGuardVal = (st.proxy_guard !== 'off');
+    swPxEl.classList.toggle('on', swProxyGuardVal);
+  }
   const px = st.proxy || {};
   const pxStateEl = $('#proxyState');
   pxStateEl.textContent = px.active ? '已开启' : '未开启';
@@ -1044,7 +1226,8 @@ async function load(){
   $('#proxyDetail').textContent = px.detail || '—';
   // 有备份才能恢复；按钮状态跟着走，避免点了没反应
   const pb = st.proxy_backup;
-  $('#btnProxyRestore').disabled = !pb;
+  const restoreBtn = $('#btnProxyRestore');
+  if (!restoreBtn.dataset._t) restoreBtn.disabled = !pb;
   $('#proxyBackupHint').textContent = pb
     ? ('已记录 ' + (pb.t || '') + ' 关闭前的设置，可一键恢复')
     : (px.active ? '关闭前会自动备份原设置' : '');
@@ -1063,8 +1246,11 @@ async function load(){
     ds.textContent += ' ← 旧版';
   }
 
-  swAutoVal = !!st.autostart;
-  $('#swAuto').classList.toggle('on', swAutoVal);
+  const swAutoEl = $('#swAuto');
+  if (!swAutoEl.classList.contains('pending')){
+    swAutoVal = !!st.autostart;
+    swAutoEl.classList.toggle('on', swAutoVal);
+  }
 
   // 一体化服务状态（自启 + 守护都来自同一个 exe，没有"组件"概念）
   const svcEl = $('#serviceState');
@@ -1125,9 +1311,12 @@ async function load(){
   }
 
   // 守护即当前 exe 的后台进程：无需任何前置组件，随时可启停
-  $('#btnDStart').disabled = !!st.daemon;
-  $('#btnDStop').disabled = !st.daemon;
-  $('#btnDRestart').disabled = !st.daemon;
+  // 操作进行中时保留转圈/禁用状态，别被轮询覆盖
+  if (!daemonBusy){
+    $('#btnDStart').disabled = !!st.daemon;
+    $('#btnDStop').disabled = !st.daemon;
+    $('#btnDRestart').disabled = !st.daemon;
+  }
   $('#daemonCompHint').textContent = st.daemon
     ? '守护以同一个 exe 在后台运行（开机自启也直接指向它）'
     : '守护未运行：点「启动守护」即可，无需安装组件';
@@ -1254,8 +1443,46 @@ async function load(){
 
 function busy(on, btn, text){
   if (!btn) return;
-  if (on){ btn.dataset._t = btn.innerHTML; btn.innerHTML = '<span class="spin"></span>' + text; btn.disabled = true; }
-  else { btn.innerHTML = btn.dataset._t || btn.innerHTML; btn.disabled = false; }
+  if (on){
+    // 主按钮是蓝底白字，浅色/危险按钮的 spinner 用当前文字色，避免看不见
+    const spin = btn.classList.contains('btn-primary') ? 'spin' : 'spin dark';
+    btn.dataset._t = btn.innerHTML;
+    btn.innerHTML = '<span class="' + spin + '"></span>' + text;
+    btn.disabled = true;
+  } else {
+    btn.innerHTML = btn.dataset._t || btn.innerHTML;
+    delete btn.dataset._t;
+    btn.disabled = false;
+  }
+}
+
+/* 守护启停/重启：按钮先转圈并禁用同组按钮，状态刷新后再按实际状态启用 */
+async function daemonAction(btn, label, url, okText){
+  if (!btn || btn.disabled) return;
+  daemonBusy = true;
+  const peers = ['btnDStart', 'btnDStart2', 'btnDStop', 'btnDRestart']
+    .map(id => document.getElementById(id))
+    .filter(b => b && b !== btn);
+  peers.forEach(b => {
+    b.dataset.wasDisabled = b.disabled ? '1' : '';
+    b.disabled = true;
+  });
+  busy(true, btn, label);
+  try {
+    const r = await post(url);
+    if (r && r.ok === false) toast((r && r.message) || '操作失败', 3600);
+    else toast(okText);
+  } catch(e){
+    toast('操作失败：' + e, 3600);
+  } finally {
+    busy(false, btn);
+    peers.forEach(b => {
+      b.disabled = b.dataset.wasDisabled === '1';
+      delete b.dataset.wasDisabled;
+    });
+    daemonBusy = false;
+    await load();
+  }
 }
 
 /* ---------- 更新下载进度 ---------- */
@@ -1345,62 +1572,114 @@ async function withTask(url, btn, busyText, doneTitle){
 /* ---------- 事件绑定 ---------- */
 $('#btnConnect').onclick = async () => {
   const btn = $('#btnConnect');
+  if (btn.disabled) return;
   busy(true, btn, '正在连接…');
-  const r = await post('/api/connect', {
-    host: $('#inHost').value,
-    username: $('#inUser').value,
-    password: $('#inPass').value,
-    service: curService
-  });
-  busy(false, btn);
-  if (r.ok) toast(r.result === 'already_online' ? '当前已在线，无需重复认证' : '认证成功 ✓');
-  else toast('认证失败：' + (r.error || '未知错误')
-    + (r.hint ? '（' + r.hint + '）' : '')
-    + '　｜　' + diagText(lastSt || {}), 6000);
-  $('#inPass').value = '';
-  load();
+  try{
+    const r = await post('/api/connect', {
+      host: $('#inHost').value,
+      username: $('#inUser').value,
+      password: $('#inPass').value,
+      service: curService
+    });
+    if (r.ok) toast(r.result === 'already_online' ? '当前已在线，无需重复认证' : '认证成功 ✓');
+    else toast('认证失败：' + (r.error || '未知错误')
+      + (r.hint ? '（' + r.hint + '）' : '')
+      + '　｜　' + diagText(lastSt || {}), 6000);
+  }catch(e){
+    toast('认证失败：' + e, 6000);
+  }finally{
+    busy(false, btn);
+    $('#inPass').value = '';
+    await load();
+  }
 };
 
-const doLogout = async () => {
-  const r = await post('/api/logout');
-  const m = Math.round(((r && r.pause) || 0) / 60);
-  toast(m > 0 ? (`已下线，${m} 分钟内不会自动重连（点「立即连接」可恢复）`) : '已下线');
-  load();
+const logoutBtns = [$('#btnLogout'), $('#btnLogout2')];
+async function doLogout(btn){
+  if (!btn || btn.disabled) return;
+  const peers = logoutBtns.filter(b => b && b !== btn);
+  peers.forEach(b => b.disabled = true);
+  busy(true, btn, '下线中…');
+  try{
+    const r = await post('/api/logout');
+    if (r && r.ok === false){
+      toast((r && r.error) || '下线失败', 3600);
+    } else {
+      const m = Math.round(((r && r.pause) || 0) / 60);
+      toast(m > 0 ? (`已下线，${m} 分钟内不会自动重连（点「立即连接」可恢复）`) : '已下线');
+    }
+  }catch(e){
+    toast('下线失败：' + e, 3600);
+  }finally{
+    busy(false, btn);
+    peers.forEach(b => b.disabled = false);
+    await load();
+  }
+}
+$('#btnLogout').onclick = () => doLogout($('#btnLogout'));
+$('#btnLogout2').onclick = () => doLogout($('#btnLogout2'));
+$('#btnRefresh').onclick = async () => {
+  const btn = $('#btnRefresh');
+  busy(true, btn, '刷新中…');
+  try { await load(); } finally { busy(false, btn); }
 };
-$('#btnLogout').onclick = doLogout;
-$('#btnLogout2').onclick = doLogout;
-$('#btnRefresh').onclick = () => load();
 $('#btnCheck').onclick = async () => {
   const btn = $('#btnCheck');
+  if (btn.disabled) return;
   busy(true, btn, '检测中…');
-  const r = await post('/api/connect', {});
-  busy(false, btn);
-  if (r.ok) toast(r.result === 'already_online' ? '已在线，无需重新认证 ✓' : '认证成功，已重新连接 ✓');
-  else toast('检测失败：' + (r.error || '未知错误') + (r.hint ? '（' + r.hint + '）' : ''), 4200);
-  load();
+  try{
+    const r = await post('/api/connect', {});
+    if (r.ok) toast(r.result === 'already_online' ? '已在线，无需重新认证 ✓' : '认证成功，已重新连接 ✓');
+    else toast('检测失败：' + (r.error || '未知错误') + (r.hint ? '（' + r.hint + '）' : ''), 4200);
+  }catch(e){
+    toast('检测失败：' + e, 4200);
+  }finally{
+    busy(false, btn);
+    await load();
+  }
 };
-$('#btnDStart').onclick = async () => { await post('/api/daemon/start'); toast('守护已启动'); load(); };
-$('#btnDStart2').onclick = async () => { await post('/api/daemon/start'); toast('守护已启动'); load(); };
-$('#btnDStop').onclick = async () => { await post('/api/daemon/stop'); toast('守护已停止'); load(); };
-$('#btnDRestart').onclick = async () => { await post('/api/daemon/restart'); toast('守护已重启'); load(); };
+$('#btnDStart').onclick = () =>
+  daemonAction($('#btnDStart'), '启动中…', '/api/daemon/start', '守护已启动');
+$('#btnDStart2').onclick = () =>
+  daemonAction($('#btnDStart2'), '启动中…', '/api/daemon/start', '守护已启动');
+$('#btnDStop').onclick = () =>
+  daemonAction($('#btnDStop'), '停止中…', '/api/daemon/stop', '守护已停止');
+$('#btnDRestart').onclick = () =>
+  daemonAction($('#btnDRestart'), '重启中…', '/api/daemon/restart', '守护已重启');
 $('#btnOpenDir').onclick = () => post('/api/open-dir');
 $('#btnDiagnose').onclick = async () => {
-  await post('/api/diagnose');
-  toast('抓取诊断已在后台启动，报告将写入 probe/capture_result.json', 4600);
+  const btn = $('#btnDiagnose');
+  if (btn.disabled) return;
+  busy(true, btn, '启动中…');
+  try{
+    await post('/api/diagnose');
+    toast('抓取诊断已在后台启动，报告将写入 probe/capture_result.json', 4600);
+  }catch(e){
+    toast('启动失败：' + e, 3600);
+  }finally{
+    busy(false, btn);
+  }
 };
 // 通知测试：三条通道一次测完
 //   ① 界面气泡（前端自己弹，就是下面这条）
 // 通知测试：优先走守护（与真实「网络已连接/认证失败」同一条自绘横幅），
 // 守护没跑时由界面进程发同款横幅；不再使用托盘气泡。
 $('#btnNotifyTest').onclick = async () => {
-  let r;
-  try { r = await post('/api/notify-test'); }
-  catch(e){ toast('通知测试失败：' + e, 4200); return; }
-  if (r && r.ok)
-    toast('测试通知已通过' + (r.via === 'daemon' ? '守护进程' : '界面进程')
-          + '发送，请查看屏幕右下角', 5000);
-  else
-    toast('通知测试失败：' + ((r && (r.daemon_msg || r.error)) || '未知原因'), 5000);
+  const btn = $('#btnNotifyTest');
+  if (btn.disabled) return;
+  busy(true, btn, '测试中…');
+  try{
+    const r = await post('/api/notify-test');
+    if (r && r.ok)
+      toast('测试通知已通过' + (r.via === 'daemon' ? '守护进程' : '界面进程')
+            + '发送，请查看屏幕右下角', 5000);
+    else
+      toast('通知测试失败：' + ((r && (r.daemon_msg || r.error)) || '未知原因'), 5000);
+  }catch(e){
+    toast('通知测试失败：' + e, 4200);
+  }finally{
+    busy(false, btn);
+  }
 };
 // 守护版本自愈：把仍在跑旧代码的后台守护重启掉，让新功能立刻生效。
 // 界面启动时已自动尝试过一次，这里是手动兜底入口。
@@ -1447,19 +1726,22 @@ async function checkUpdate(btn){
   busy(false, btn);
   load();
 }
-async function openRelease(){
+async function openRelease(btn){
   const url = (lastSt && lastSt.update && lastSt.update.url)
     || 'https://github.com/Origin-XiChen/campus-net-auth/releases';
+  if (btn && btn.disabled) return;
+  if (btn) busy(true, btn, '打开中…');
   try{
     const r = await post('/api/update/open', {});
     if (!(r && r.ok)) toast('打开失败，请手动访问：' + url, 5000);
   }catch(e){ toast('打开失败：' + e, 4000); }
+  finally{ if (btn) busy(false, btn); }
 }
 $('#btnUpdateCheck').onclick = () => checkUpdate($('#btnUpdateCheck'));
-$('#btnOpenRelease').onclick = () => openRelease();
+$('#btnOpenRelease').onclick = () => openRelease($('#btnOpenRelease'));
 // 一键下载并升级：下载/校验在后台任务里跑，前端用 withTask 轮询结果
 $('#btnUpdateInstall').onclick = () => openUpdateDialog((lastSt && lastSt.update) || {});
-$('#btnOpenRelease2').onclick = () => openRelease();
+$('#btnOpenRelease2').onclick = () => openRelease($('#btnOpenRelease2'));
 // 彻底卸载：安装版交给安装器自带的卸载程序；绿色版拉起同目录的独立卸载器（若有）。
 // ⚠️ 运行中的主 exe 删不掉自己：卸载程序会连本界面进程一起收掉，所以这里只负责
 // 把它拉起来，不做任何"先删点什么"的动作。
@@ -1477,24 +1759,37 @@ $('#btnPurge').onclick = () => confirmDialog({
       + '确认后请在弹出的卸载窗口里再次确认。',
   okText: '启动卸载程序',
   onOk: async () => {
+    const btn = $('#btnPurge');
+    busy(true, btn, '启动中…');
     try{
       const r = await post('/api/uninstall', {});
       toast((r && r.ok) ? (r.message || '卸载程序已启动')
                         : ('启动失败：' + ((r && r.error) || (r && r.message) || '未知原因')), 5000);
     }catch(e){ toast('出错：' + e, 3600); }
+    finally{ busy(false, btn); }
   }
 });
 $('#deployBannerClose').onclick = () => { deployBannerDone = true; $('#deployBanner').style.display = 'none'; };
 $('#btnSaveAuto').onclick = async () => {
-  await post('/api/config', {
-    interval: $('#inInterval').value,
-    offline_interval: $('#inOffline').value,
-    retry_interval: $('#inRetry').value,
-    max_interval: $('#inMax').value,
-    timeout: $('#inTimeout').value
-  });
-  toast('设置已保存');
-  load();
+  const btn = $('#btnSaveAuto');
+  if (btn.disabled) return;
+  busy(true, btn, '保存中…');
+  try{
+    const r = await post('/api/config', {
+      interval: $('#inInterval').value,
+      offline_interval: $('#inOffline').value,
+      retry_interval: $('#inRetry').value,
+      max_interval: $('#inMax').value,
+      timeout: $('#inTimeout').value
+    });
+    if (r && r.ok === false) toast((r && r.error) || '保存失败', 3200);
+    else toast('设置已保存');
+  }catch(e){
+    toast('保存失败：' + e, 3200);
+  }finally{
+    busy(false, btn);
+    await load();
+  }
 };
 
 load();
