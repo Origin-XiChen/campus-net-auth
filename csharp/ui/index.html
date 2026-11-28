@@ -291,6 +291,14 @@ input{font-family:inherit;font-size:inherit}
 .modal-body b{color:var(--danger);font-weight:700}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
 .modal-actions .btn{min-width:88px}
+/* 更新公告弹窗 */
+.update-modal{width:600px;max-width:calc(100vw - 48px)}
+.update-vers{display:flex;justify-content:space-between;gap:10px;margin-top:8px;
+  font-size:12px;color:var(--muted)}
+.update-notes{margin-top:12px;max-height:280px;overflow:auto;white-space:pre-wrap;
+  font-size:12.5px;line-height:1.7;color:#333;background:#f7f7f9;
+  border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.update-notes.loading{color:var(--muted)}
 
 /* ---------- 气泡通知 ---------- */
 .toast{
@@ -626,6 +634,27 @@ input{font-family:inherit;font-size:inherit}
   </div>
 </div>
 
+<!-- 新版本弹窗：自动检测到更新时展示 GitHub Release 公告，并在同一弹窗里显示下载进度 -->
+<div class="modal-mask" id="updateMask">
+  <div class="modal update-modal" role="dialog" aria-modal="true">
+    <div class="modal-title" id="updateModalTitle">发现新版本</div>
+    <div class="update-vers" id="updateModalVers"></div>
+    <div class="update-notes loading" id="updateModalNotes">正在加载更新公告…</div>
+    <div class="update-progress" id="updMProgress" style="display:none">
+      <div class="update-bar"><i id="updMBar"></i></div>
+      <div class="update-meta">
+        <span id="updMPct">0%</span>
+        <span id="updMSpeed"></span>
+        <span id="updMBytes"></span>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="updateLater">稍后</button>
+      <button class="btn btn-primary" id="updateNow">立即更新</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (s) => document.querySelector(s);
 // 会话令牌：serve() 每次启动随机生成并拼在页面 URL（?token=）上；
@@ -696,6 +725,106 @@ function outputDialog(title, text){
   mask.classList.add('show');
   $('#outputClose').onclick = () => mask.classList.remove('show');
   mask.onclick = (e) => { if (e.target === mask) mask.classList.remove('show'); };
+}
+
+
+/* ---------- 新版本公告弹窗（自动检测 + 公告 + 下载进度） ---------- */
+function setModalProgress(p){
+  const pct = Math.max(0, Math.min(100, Number(p && p.percent) || 0));
+  $('#updMBar').style.width = pct + '%';
+  $('#updMPct').textContent = Math.round(pct) + '%'
+    + (p && p.phase ? ' · ' + p.phase : '');
+  $('#updMSpeed').textContent = (p && p.speed > 0) ? (fmtBytes(p.speed) + '/s') : '';
+  $('#updMBytes').textContent = (p && p.total > 0)
+    ? (fmtBytes(p.downloaded) + ' / ' + fmtBytes(p.total)) : '';
+}
+async function openUpdateDialog(upd){
+  if (!upd || !upd.latest) return;
+  const mask = $('#updateMask');
+  $('#updateModalTitle').textContent = '发现新版本 v' + upd.latest;
+  $('#updateModalVers').innerHTML = '当前 <b>v' + esc((lastSt && lastSt.app_version) || '')
+    + '</b>　→　最新 <b>v' + esc(upd.latest) + '</b>';
+  const notes = $('#updateModalNotes');
+  notes.className = 'update-notes loading';
+  notes.textContent = '正在加载更新公告…';
+  $('#updMProgress').style.display = 'none';
+  setModalProgress({percent:0, phase:''});
+  $('#updateNow').disabled = false;
+  $('#updateLater').disabled = false;
+  $('#updateNow').textContent = '立即更新';
+  mask.classList.add('show');
+  $('#updateLater').onclick = () => {
+    mask.classList.remove('show');
+    sessionStorage.setItem('cnaUpdateLater', upd.latest);
+  };
+  mask.onclick = (e) => { if (e.target === mask) $('#updateLater').onclick(); };
+  $('#updateNow').onclick = () => startModalUpdate(upd);
+  try{
+    const r = await api('/api/update/notes?version=' + encodeURIComponent(upd.latest));
+    notes.className = 'update-notes';
+    if (r && r.ok && String(r.notes || '').trim()){
+      notes.textContent = r.notes;
+    } else {
+      notes.textContent = '（未能获取更新公告'
+        + (r && r.error ? '：' + r.error : '') + '）\n可直接点击「立即更新」。';
+    }
+  }catch(e){
+    notes.className = 'update-notes';
+    notes.textContent = '（获取更新公告失败：' + e + '）\n可直接点击「立即更新」。';
+  }
+}
+function maybePromptUpdate(st){
+  const upd = st && st.update;
+  if (!upd || !upd.available || !upd.latest) return;
+  if (document.querySelector('.modal-mask.show')) return;
+  if ($('#updateMask').classList.contains('show')) return;
+  if (sessionStorage.getItem('cnaUpdateLater') === upd.latest) return;
+  if (sessionStorage.getItem('cnaUpdatePrompted') === upd.latest) return;
+  sessionStorage.setItem('cnaUpdatePrompted', upd.latest);
+  openUpdateDialog(upd);
+}
+async function startModalUpdate(upd){
+  $('#updateNow').disabled = true;
+  $('#updateLater').disabled = true;
+  $('#updateNow').innerHTML = '<span class="spin"></span>下载中…';
+  $('#updMProgress').style.display = 'block';
+  setModalProgress({percent:0, phase:'准备下载'});
+  const fail = (text) => {
+    $('#updateModalNotes').textContent = text;
+    $('#updateNow').disabled = false;
+    $('#updateLater').disabled = false;
+    $('#updateNow').textContent = '重试';
+    $('#updateNow').onclick = () => startModalUpdate(upd);
+  };
+  try{
+    const r = await post('/api/update/install');
+    if (!r.id) throw new Error('启动失败');
+    const id = r.id;
+    for (let i = 0; i < 1800; i++){
+      await new Promise(res => setTimeout(res, 1000));
+      let t;
+      try { t = await api('/api/task?id=' + id); }
+      catch(e){
+        $('#updateModalNotes').textContent = '更新已下载，正在重启应用…';
+        return;
+      }
+      if (t.progress) setModalProgress(t.progress);
+      if (t.status !== 'running'){
+        if (t.status === 'done'){
+          $('#updateModalNotes').textContent = (t.output && String(t.output).trim())
+            || '更新已下载，应用即将重启…';
+        } else {
+          fail('更新失败：' + ((t.output && String(t.output).trim()) || '未知错误'));
+        }
+        return;
+      }
+      const pct = Math.round(Number(t.progress && t.progress.percent) || 0);
+      $('#updateNow').innerHTML = '<span class="spin"></span>' + pct + '%';
+    }
+    fail('任务超时，请稍后重试。');
+  }catch(e){
+    fail('更新失败：' + e);
+  }
 }
 
 /* ---------- 窗口控制：优先 pywebview js_api，回退 HTTP ---------- */
@@ -903,6 +1032,8 @@ async function load(){
     else if (upd.checked_at){ upState.textContent = '检查失败'; upState.className = 'comp-state warn'; }
     else { upState.textContent = '待检查'; upState.className = 'comp-state'; }
   }
+
+  maybePromptUpdate(st);
 
   // 卸载：安装版由安装器接管（Update.exe --uninstall）；绿色版没有独立卸载器
   const cUn = $('#compUninsState');
@@ -1256,19 +1387,7 @@ async function openRelease(){
 $('#btnUpdateCheck').onclick = () => checkUpdate($('#btnUpdateCheck'));
 $('#btnOpenRelease').onclick = () => openRelease();
 // 一键下载并升级：下载/校验在后台任务里跑，前端用 withTask 轮询结果
-$('#btnUpdateInstall').onclick = () => {
-  const u = (lastSt && lastSt.update) || {};
-  const size = u.asset_size ? ('约 ' + (u.asset_size / 1048576).toFixed(1) + ' MB')
-                            : 'Release 资产';
-  confirmDialog({
-    title: '下载并升级到 v' + (u.latest || ''),
-    html: '将下载 <b>v' + esc(u.latest || '') + '</b>（' + size + '）并<b>就地升级</b>：'
-        + '停止守护 → 替换程序文件 → 用新版本重启。<br><br>'
-        + '下载后会校验 <b>SHA256 + 文件版本</b>；升级完成后应用会自动重启（守护会自动拉起）。确定继续？',
-    okText: '下载并升级',
-    onOk: () => runUpdateInstall($('#btnUpdateInstall'))
-  });
-};
+$('#btnUpdateInstall').onclick = () => openUpdateDialog((lastSt && lastSt.update) || {});
 $('#btnOpenRelease2').onclick = () => openRelease();
 // 彻底卸载：安装版交给安装器自带的卸载程序；绿色版拉起同目录的独立卸载器（若有）。
 // ⚠️ 运行中的主 exe 删不掉自己：卸载程序会连本界面进程一起收掉，所以这里只负责

@@ -190,6 +190,17 @@ public sealed class ApiServer : IDisposable
                 });
             case "/api/update/open":
                 return JsonResponse(new JsonObject { ["ok"] = UpdateCheck.OpenReleasePage() });
+            case "/api/update/notes":
+            {
+                var ver = request.QueryValue("version") ?? "";
+                var (ok, notes, error) = UpdateCheck.FetchNotes(ver);
+                return JsonResponse(new JsonObject
+                {
+                    ["ok"] = ok,
+                    ["notes"] = notes,
+                    ["error"] = error,
+                });
+            }
             case "/api/update/install":
                 return JsonResponse(new JsonObject
                 {

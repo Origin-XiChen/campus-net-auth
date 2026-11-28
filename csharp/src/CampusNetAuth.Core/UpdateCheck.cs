@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace CampusNetAuth;
 
@@ -91,6 +92,38 @@ public static class UpdateCheck
     public static bool AllowedAsset(string url) =>
         url.StartsWith($"https://github.com/{AppInfo.GitHubRepo}/releases/download/",
             StringComparison.Ordinal);
+
+    /// <summary>读取某个 Release 的更新公告（GitHub body），用于更新弹窗展示。</summary>
+    public static (bool Ok, string Notes, string Error) FetchNotes(string version, double timeout = 8)
+    {
+        var v = (version ?? "").Trim();
+        if (!Regex.IsMatch(v, @"^[0-9A-Za-z.+-]{1,40}$"))
+            return (false, "", "版本号无效");
+        var lastError = "";
+        foreach (var tag in new[] { "V" + v, v })
+        {
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get,
+                    $"https://api.github.com/repos/{AppInfo.GitHubRepo}/releases/tags/{tag}");
+                req.Headers.TryAddWithoutValidation("User-Agent", "CampusNetAuth/" + AppInfo.Version);
+                req.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeout));
+                using var resp = Gh.Send(req, HttpCompletionOption.ResponseContentRead, cts.Token);
+                if (!resp.IsSuccessStatusCode) continue;
+                var text = resp.Content.ReadAsStringAsync(cts.Token).GetAwaiter().GetResult();
+                var payload = JsonNode.Parse(text) as JsonObject;
+                var body = payload?.GetString("body") ?? "";
+                if (body.Length > 12000) body = body[..12000] + "\n…";
+                return (true, body, "");
+            }
+            catch (Exception e)
+            {
+                lastError = e.Message;
+            }
+        }
+        return (false, "", string.IsNullOrEmpty(lastError) ? "未找到该版本的更新公告" : lastError);
+    }
 
     public static JsonObject CheckLatest(bool force = false, double timeout = 5)
     {
