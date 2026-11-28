@@ -643,6 +643,7 @@ public static class Daemon
                         Kind = NotifyKind.Success,
                         Title = "通知测试",
                         Message = "守护进程自绘横幅正常",
+                        Context = Diagnostic(Config.Load()),
                         AutoCloseSeconds = 6,
                     });
                     Reply(stream, "OK");

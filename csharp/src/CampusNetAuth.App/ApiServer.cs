@@ -204,9 +204,10 @@ public sealed class ApiServer : IDisposable
                 return JsonResponse(new JsonObject { ["id"] = StartTask(HealthTask, "health") });
             case "/api/notify-test":
             {
-                var uiOk = Notify.System("校园网无感认证", "界面进程通知测试", 3, dedup: false);
+                var uiOk = false;
                 var daemonOk = false;
                 var daemonMsg = "守护未运行";
+                var via = "ui";
                 if (Daemon.IsRunning())
                 {
                     try
@@ -220,17 +221,32 @@ public sealed class ApiServer : IDisposable
                         var n = s.Read(buf, 0, buf.Length);
                         daemonOk = n > 0 && Encoding.UTF8.GetString(buf, 0, n).StartsWith("OK");
                         daemonMsg = daemonOk ? "" : "守护无回执";
+                        if (daemonOk) via = "daemon";
                     }
                     catch (Exception e)
                     {
                         daemonMsg = e.Message;
                     }
                 }
+                if (!daemonOk)
+                {
+                    // 守护没跑：由界面进程发同款自绘横幅（同样走 NotificationUi）
+                    uiOk = Notify.Custom(new NotifyRequest
+                    {
+                        Kind = NotifyKind.Success,
+                        Title = "通知测试",
+                        Message = "界面进程自绘横幅正常",
+                        AutoCloseSeconds = 6,
+                    });
+                    via = "ui";
+                }
                 return JsonResponse(new JsonObject
                 {
+                    ["ok"] = daemonOk || uiOk,
                     ["ui_ok"] = uiOk,
                     ["daemon_ok"] = daemonOk,
                     ["daemon_msg"] = daemonMsg,
+                    ["via"] = via,
                 });
             }
             case "/api/open-dir":

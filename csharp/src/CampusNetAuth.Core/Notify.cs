@@ -85,6 +85,27 @@ public static class Notify
             }
             Log.Info("通知：{0} - {1}", title, message);
 
+            // 注册了自绘横幅（App 进程）就统一走横幅，避免托盘气泡与横幅两套样式
+            var custom = CustomHandler;
+            if (custom != null)
+            {
+                try
+                {
+                    custom(new NotifyRequest
+                    {
+                        Kind = NotifyKind.Info,
+                        Title = title,
+                        Message = message,
+                        AutoCloseSeconds = Math.Clamp(timeout, 3, 8),
+                    });
+                    return true;
+                }
+                catch
+                {
+                    // 自定义通道失败 → 回退托盘/系统气泡
+                }
+            }
+
             var hook = UiBalloon;
             if (hook != null)
             {
