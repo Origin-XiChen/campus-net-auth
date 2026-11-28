@@ -155,7 +155,8 @@ git grep -nE "\b[0-9]{10}\b" -- .      # 人工确认全是占位值/时间戳/�
 > 开发/应急构建，不再上传。绿色/便携用户检查更新时只提示前往发布页改用安装包；
 > V1.0.2 是最后一个附带绿色包的版本。
 
-1. 改版本唯一来源：`csharp/src/CampusNetAuth.App/CampusNetAuth.App.csproj` 与
+1. 写发布说明 `docs/releases/V<版本>.md`；改版本唯一来源：
+   `csharp/src/CampusNetAuth.App/CampusNetAuth.App.csproj` 与
    `csharp/src/CampusNetAuth.Setup/CampusNetAuth.Setup.csproj` 的 `<Version>`（两处保持一致）。
 2. 构建安装版：
    ```powershell
@@ -173,7 +174,7 @@ git grep -nE "\b[0-9]{10}\b" -- .      # 人工确认全是占位值/时间戳/�
 6. 发布（草稿 → 上传 → 发布，避免大资产中断留下半成品）：
    ```bash
    gh release create V<版本> --repo Origin-XiChen/campus-net-auth \
-     --title "CampusNetAuth V<版本>" --notes-file <说明.md> --draft --verify-tag
+     --title "CampusNetAuth V<版本>" --notes-file docs/releases/V<版本>.md --draft --verify-tag
    gh release upload V<版本> --repo Origin-XiChen/campus-net-auth \
      CampusNetAuth-Installer.exe CampusNetAuth-win-Setup.exe \
      CampusNetAuth-<版本>-full.nupkg releases.win.json assets.win.json RELEASES
